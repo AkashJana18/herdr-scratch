@@ -40,6 +40,19 @@ There is no Herdr-managed storage API in v1. `HERDR_PLUGIN_CONFIG_DIR` and
 The pane entrypoint runs the scratchpad session process. Users should invoke
 public actions or CLI commands.
 
+## Command Resolution Notes
+
+Herdr stores a linked plugin's `plugin_root`, but manifest command argv values
+are preserved. Source inspection shows action commands are spawned from the
+manifest argv with `current_dir(plugin_root)`, and pane commands are passed to
+Herdr's pane launcher with a cwd that may be overridden by the caller. Herdr does
+not rewrite `target/release/herdr-scratch` into an absolute path.
+
+For that reason, this manifest must not use the built binary as a relative
+program path. The current macOS/Linux manifest invokes `/bin/sh -c` and executes
+`"$HERDR_PLUGIN_ROOT/target/release/herdr-scratch" ...`, using the plugin-root
+environment variable Herdr injects for actions and plugin panes.
+
 ## Relevant Herdr CLI Commands
 
 Current adapter operations use Herdr CLI commands:
