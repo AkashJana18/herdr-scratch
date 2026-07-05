@@ -7,6 +7,8 @@ logs, and project-local scratch work alive across normal navigation. The public
 interface is intentionally scratchpad-oriented: users work with names, scopes,
 profiles, and lifecycle states, not Herdr implementation details.
 
+Current platform support: macOS and Linux.
+
 ## Features
 
 - Named scratchpads with `toggle`, `open`, `focus`, `hide`, and `close`.
@@ -32,6 +34,9 @@ Link the local plugin while developing:
 ```bash
 herdr plugin link .
 ```
+
+`herdr plugin link` does not build local plugins, so run `cargo build --release`
+before linking or invoking plugin actions during development.
 
 Verify setup:
 
@@ -168,6 +173,10 @@ Placeholder: project-local scratchpad with custom profile.
 The current implementation uses Herdr's documented CLI/plugin-pane APIs behind
 that adapter. Public commands, config, and registry lifecycle terms do not expose
 which Herdr surface is used internally.
+
+Manifest actions launch the built binary through Herdr's injected
+`HERDR_PLUGIN_ROOT` path. This avoids depending on the Herdr server process
+working directory when resolving `target/release/herdr-scratch`.
 
 See:
 
