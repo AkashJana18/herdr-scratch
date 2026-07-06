@@ -6,52 +6,52 @@ description = "Persistent named scratchpads for Herdr"
 platforms = ["linux", "macos"]
 
 [[build]]
-command = ["cargo", "build", "--release"]
+command = ["/bin/sh", "-c", "exec \"${HERDR_PLUGIN_ROOT:-.}/scripts/install-binary.sh\""]
 
 [[actions]]
 id = "toggle"
 title = "Toggle scratchpad"
 description = "Show the default scratchpad, or return to the previous Herdr context when it is active."
 contexts = ["workspace", "tab", "pane"]
-command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-scratch\" toggle"]
+command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" toggle"]
 
 [[actions]]
 id = "open"
 title = "Open scratchpad"
 description = "Create or show the default scratchpad."
 contexts = ["workspace", "tab", "pane"]
-command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-scratch\" open"]
+command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" open"]
 
 [[actions]]
 id = "list"
 title = "List scratchpads"
 description = "List known scratchpads."
 contexts = ["workspace", "tab", "pane"]
-command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-scratch\" list"]
+command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" list"]
 
 [[actions]]
 id = "doctor"
 title = "Check scratch setup"
 description = "Validate Herdr Scratch configuration and runtime connectivity."
 contexts = ["global", "workspace", "tab", "pane"]
-command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-scratch\" doctor"]
+command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" doctor"]
 
 [[actions]]
 id = "lazygit"
 title = "Toggle lazygit"
 description = "Open or focus a lazygit scratchpad in the current Herdr context."
 contexts = ["workspace", "tab", "pane"]
-command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-scratch\" toggle lazygit -- lazygit"]
+command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" toggle lazygit -- lazygit"]
 
 [[actions]]
 id = "notes"
 title = "Toggle notes"
 description = "Open or focus a notes scratchpad."
 contexts = ["workspace", "tab", "pane"]
-command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-scratch\" toggle notes"]
+command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" toggle notes"]
 
 [[panes]]
 id = "scratch"
 title = "Scratch"
 description = "Managed scratchpad session."
-command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-scratch\" session"]
+command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" session"]

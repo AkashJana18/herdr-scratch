@@ -7,7 +7,8 @@ logs, and project-local scratch work alive across normal navigation. The public
 interface is intentionally scratchpad-oriented: users work with names, scopes,
 profiles, and lifecycle states, not Herdr implementation details.
 
-Current platform support: macOS and Linux.
+Current platform support: macOS and Linux. Published plugin installs use
+prebuilt binaries from GitHub Releases, so users do not need Rust or Cargo.
 
 ## Features
 
@@ -24,6 +25,34 @@ Current platform support: macOS and Linux.
 
 ## Installation
 
+Install from GitHub:
+
+```bash
+herdr plugin install AkashJana18/herdr-scratch
+```
+
+During installation Herdr runs `scripts/install-binary.sh`. The installer
+detects the current platform, downloads the matching `v0.1.0` release asset,
+verifies the SHA256 checksum from `checksums.txt`, and installs the executable
+at:
+
+```text
+$HERDR_PLUGIN_ROOT/bin/herdr-scratch
+```
+
+Supported binary platforms:
+
+| Platform | Target |
+| --- | --- |
+| macOS Apple Silicon | `aarch64-apple-darwin` |
+| macOS Intel | `x86_64-apple-darwin` |
+| Linux x86_64 | `x86_64-unknown-linux-gnu` |
+
+Required system tools for binary installation are `/bin/sh`, `uname`, `curl`,
+`tar`, and either `sha256sum` or `shasum`.
+
+## Local Development
+
 Build from source:
 
 ```bash
@@ -36,17 +65,25 @@ Link the local plugin while developing:
 herdr plugin link .
 ```
 
-`herdr plugin link` does not build local plugins, so run `cargo build --release`
-before linking or invoking plugin actions during development.
+`herdr plugin link` does not build local plugins. This repository includes a
+development wrapper at `bin/herdr-scratch` that executes
+`target/release/herdr-scratch`, so run `cargo build --release` before linking
+or invoking plugin actions during development.
 
 Verify setup:
 
 ```bash
 target/release/herdr-scratch doctor
+target/release/herdr-scratch --version
 ```
 
-For a future Marketplace install, the plugin is intended to be installed from a
-public GitHub repository containing `herdr-plugin.toml` at the repository root.
+To test the release installer without mutating this checkout, set
+`HERDR_PLUGIN_ROOT` to a temporary directory:
+
+```bash
+HERDR_PLUGIN_ROOT=/tmp/herdr-scratch-install-test scripts/install-binary.sh
+/tmp/herdr-scratch-install-test/bin/herdr-scratch --version
+```
 
 ## Configuration
 
@@ -107,6 +144,7 @@ herdr-scratch rename <old> <new>
 herdr-scratch send <name> <text>
 herdr-scratch run <name> <command>
 herdr-scratch doctor [--json]
+herdr-scratch --version
 herdr-scratch config path
 herdr-scratch config init [--force]
 herdr-scratch config add <name> [--scope workspace|cwd|global] [--cwd context|workspace|home|PATH] -- <command>...
@@ -204,9 +242,47 @@ The current implementation uses Herdr's documented CLI/plugin-pane APIs behind
 that adapter. Public commands, config, and registry lifecycle terms do not expose
 which Herdr surface is used internally.
 
-Manifest actions launch the built binary through Herdr's injected
-`HERDR_PLUGIN_ROOT` path. This avoids depending on the Herdr server process
-working directory when resolving `target/release/herdr-scratch`.
+Manifest actions launch `"$HERDR_PLUGIN_ROOT/bin/herdr-scratch"`. In installed
+plugins that path is the downloaded release binary. In this source checkout it
+is a development wrapper that delegates to `target/release/herdr-scratch`.
+
+## Release Process
+
+1. Update `VERSION`, `Cargo.toml`, and `herdr-plugin.toml` to the same version.
+2. Run local verification:
+
+   ```bash
+   cargo fmt --check
+   cargo clippy -- -D warnings
+   cargo test
+   cargo build --release
+   target/release/herdr-scratch --version
+   target/release/herdr-scratch doctor
+   ```
+
+3. Commit the release changes.
+4. Create and push a matching tag:
+
+   ```bash
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+
+5. GitHub Actions builds release binaries, generates `checksums.txt`, and
+   publishes the GitHub Release.
+6. Verify a clean install:
+
+   ```bash
+   herdr plugin install AkashJana18/herdr-scratch --ref v0.1.0
+   ```
+
+Design decisions and assumptions:
+
+- `VERSION` is the release source used by the installer and workflow.
+- CI fails if `VERSION`, `Cargo.toml`, or `herdr-plugin.toml` disagree.
+- Linux arm64 is deferred until a reliable release target is needed.
+- Windows is out of scope because the manifest currently supports Linux and
+  macOS only.
 
 See:
 

@@ -18,6 +18,7 @@ herdr-scratch rename <old> <new>
 herdr-scratch send <name> <text>
 herdr-scratch run <name> <command>
 herdr-scratch doctor [--json]
+herdr-scratch --version
 herdr-scratch config path
 herdr-scratch config init [--force]
 herdr-scratch config add <name> [--scope workspace|cwd|global] [--cwd context|workspace|home|PATH] -- <command>...
@@ -93,6 +94,11 @@ validates handles before using them. Stale records are repaired by `open` and
 ## Plugin Manifest
 
 The repository root contains `herdr-plugin.toml`.
+
+Published installs run `scripts/install-binary.sh` as the manifest build step.
+The installer downloads the matching GitHub Release asset and installs
+`$HERDR_PLUGIN_ROOT/bin/herdr-scratch`. Runtime actions and pane entrypoints
+execute that installed binary.
 
 Public action IDs:
 

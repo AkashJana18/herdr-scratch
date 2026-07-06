@@ -38,6 +38,8 @@ only.
 - `src/output.rs`: human and JSON output formatting.
 - `herdr-plugin.toml`: Marketplace-style manifest actions and internal session
   entrypoint.
+- `scripts/install-binary.sh`: install-time binary downloader for Herdr plugin
+  installs.
 
 ## Data Flow
 
@@ -133,6 +135,8 @@ Supported extension points:
   real Herdr server.
 - Manual smoke test against Herdr before publishing: link, doctor, toggle, list,
   status, send, run, close.
+- Release smoke test before publishing: install into a clean plugin root,
+  verify checksum-protected binary download, then run `--version` and `doctor`.
 
 ## Current Limitations
 
