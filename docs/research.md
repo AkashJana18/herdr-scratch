@@ -171,3 +171,8 @@ target/release/herdr-scratch doctor
 target/release/herdr-scratch toggle
 target/release/herdr-scratch list
 ```
+
+For published installs, Herdr runs the manifest build step, which downloads the
+matching GitHub Release binary into `$HERDR_PLUGIN_ROOT/bin/herdr-scratch`.
+Local linked development keeps using `cargo build --release`; the checked-in
+`bin/herdr-scratch` wrapper delegates to `target/release/herdr-scratch`.

@@ -158,10 +158,10 @@ impl Herdr for HerdrCli {
     }
 
     fn focus_previous(&self, previous: &FocusSnapshot) -> Result<(), HerdrError> {
-        if let Some(pane_id) = previous.pane_id.as_deref() {
-            if self.focus_pane_by_id(pane_id).is_ok() {
-                return Ok(());
-            }
+        if let Some(pane_id) = previous.pane_id.as_deref()
+            && self.focus_pane_by_id(pane_id).is_ok()
+        {
+            return Ok(());
         }
         if let Some(focus_token) = previous.focus_token.as_deref() {
             self.run_ok(&["tab".into(), "focus".into(), focus_token.into()])?;

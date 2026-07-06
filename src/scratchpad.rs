@@ -241,18 +241,16 @@ impl<H: Herdr> ScratchApp<H> {
         command: Option<Vec<String>>,
     ) -> anyhow::Result<Output> {
         let existing = self.registry.scratchpads.get(&target.key).cloned();
-        if self.config.behavior.reuse_existing {
-            if let Some(record) = existing.as_ref() {
-                if let Some(handle) = record.handle.as_ref() {
-                    if self.ensure_live(handle).is_ok() {
-                        self.rename_handle_best_effort(handle, &self.title_for(&target.name));
-                        self.herdr.focus_handle(handle)?;
-                        self.update_visible(&target.key, previous.map(FocusSnapshot::from));
-                        self.save()?;
-                        return Ok(Output::Text(format!("opened scratchpad `{}`", target.name)));
-                    }
-                }
-            }
+        if self.config.behavior.reuse_existing
+            && let Some(record) = existing.as_ref()
+            && let Some(handle) = record.handle.as_ref()
+            && self.ensure_live(handle).is_ok()
+        {
+            self.rename_handle_best_effort(handle, &self.title_for(&target.name));
+            self.herdr.focus_handle(handle)?;
+            self.update_visible(&target.key, previous.map(FocusSnapshot::from));
+            self.save()?;
+            return Ok(Output::Text(format!("opened scratchpad `{}`", target.name)));
         }
 
         let record = self.create_record(

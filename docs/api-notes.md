@@ -47,12 +47,19 @@ Herdr stores a linked plugin's `plugin_root`, but manifest command argv values
 are preserved. Source inspection shows action commands are spawned from the
 manifest argv with `current_dir(plugin_root)`, and pane commands are passed to
 Herdr's pane launcher with a cwd that may be overridden by the caller. Herdr does
-not rewrite `target/release/herdr-scratch` into an absolute path.
+not rewrite relative binary paths into absolute paths.
 
 For that reason, this manifest must not use the built binary as a relative
 program path. The current macOS/Linux manifest invokes `/bin/sh -c` and executes
-`"$HERDR_PLUGIN_ROOT/target/release/herdr-scratch" ...`, using the plugin-root
-environment variable Herdr injects for actions and plugin panes.
+`"$HERDR_PLUGIN_ROOT/bin/herdr-scratch" ...`, using the plugin-root environment
+variable Herdr injects for actions and plugin panes.
+
+During `herdr plugin install`, the manifest build step runs
+`scripts/install-binary.sh`. The script downloads a prebuilt binary from GitHub
+Releases, verifies the SHA256 checksum, and installs it at
+`$HERDR_PLUGIN_ROOT/bin/herdr-scratch`. During local linked development,
+`bin/herdr-scratch` is a checked-in wrapper that delegates to
+`target/release/herdr-scratch`.
 
 ## Relevant Herdr CLI Commands
 

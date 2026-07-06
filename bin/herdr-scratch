@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PLUGIN_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+DEV_BINARY="$PLUGIN_ROOT/target/release/herdr-scratch"
+
+if [ ! -x "$DEV_BINARY" ]; then
+    echo "error: local development binary not found at $DEV_BINARY" >&2
+    echo "run: cargo build --release" >&2
+    exit 127
+fi
+
+exec "$DEV_BINARY" "$@"
