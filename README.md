@@ -12,6 +12,7 @@ Current platform support: macOS and Linux.
 ## Features
 
 - Named scratchpads with `toggle`, `open`, `focus`, `hide`, and `close`.
+- One-shot command scratchpads, such as `open lazygit -- lazygit`.
 - Scoped scratchpads: `global`, `workspace`, or `cwd`.
 - Reuse of existing live scratchpads to avoid duplicates.
 - Versioned JSON registry with stale-handle repair on `open` and `toggle`.
@@ -95,8 +96,8 @@ interface.
 ## Commands
 
 ```text
-herdr-scratch toggle [name]
-herdr-scratch open [name]
+herdr-scratch toggle [name] [-- <command>...]
+herdr-scratch open [name] [-- <command>...]
 herdr-scratch focus [name]
 herdr-scratch hide [name]
 herdr-scratch close [name]
@@ -107,6 +108,8 @@ herdr-scratch send <name> <text>
 herdr-scratch run <name> <command>
 herdr-scratch doctor [--json]
 herdr-scratch config path
+herdr-scratch config init [--force]
+herdr-scratch config add <name> [--scope workspace|cwd|global] [--cwd context|workspace|home|PATH] -- <command>...
 herdr-scratch state path
 ```
 
@@ -122,6 +125,19 @@ Open a named scratchpad:
 
 ```bash
 herdr-scratch open notes
+```
+
+Open lazygit with one command:
+
+```bash
+herdr-scratch open lazygit -- lazygit
+```
+
+Persist lazygit as a configured scratchpad:
+
+```bash
+herdr-scratch config init
+herdr-scratch config add lazygit -- lazygit
 ```
 
 Send a command to an existing scratchpad:
@@ -152,6 +168,18 @@ key = "prefix+shift+p"
 type = "plugin_action"
 command = "herdr.scratch.list"
 description = "list scratchpads"
+
+[[keys.command]]
+key = "prefix+g"
+type = "plugin_action"
+command = "herdr.scratch.lazygit"
+description = "toggle lazygit scratchpad"
+
+[[keys.command]]
+key = "prefix+n"
+type = "plugin_action"
+command = "herdr.scratch.notes"
+description = "toggle notes scratchpad"
 ```
 
 ## Screenshots

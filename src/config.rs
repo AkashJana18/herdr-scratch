@@ -71,6 +71,15 @@ impl Config {
         Ok(config)
     }
 
+    pub fn save(&self, path: &Path) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let encoded = toml::to_string_pretty(self)?;
+        std::fs::write(path, encoded)?;
+        Ok(())
+    }
+
     pub fn scratchpad_name<'a>(&'a self, requested: Option<&'a str>) -> &'a str {
         requested.unwrap_or(&self.default_scratchpad)
     }
@@ -328,5 +337,26 @@ scope = "workspace"
         )
         .unwrap();
         assert!(matches!(config.profile("default").cwd, CwdMode::Context));
+    }
+
+    #[test]
+    fn config_save_round_trips_path_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut config = Config::default();
+        config.profiles.insert(
+            "logs".to_string(),
+            ProfileConfig {
+                command: vec!["tail".into(), "-f".into(), "app.log".into()],
+                cwd: CwdMode::Path("/tmp/project".into()),
+                env: HashMap::new(),
+            },
+        );
+
+        config.save(&path).unwrap();
+        let loaded = Config::load(&path).unwrap();
+        let profile = loaded.profile("logs");
+        assert_eq!(profile.command, vec!["tail", "-f", "app.log"]);
+        assert!(matches!(profile.cwd, CwdMode::Path(path) if path == "/tmp/project"));
     }
 }

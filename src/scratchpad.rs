@@ -1,10 +1,14 @@
-use std::{collections::BTreeMap, path::PathBuf, process::Command};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::PathBuf,
+    process::Command,
+};
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
     cli,
-    config::{Config, CwdMode, Paths, ProfileConfig, ScopeKind},
+    config::{Config, CwdMode, Paths, ProfileConfig, ScopeKind, ScratchpadConfig},
     herdr::{Herdr, OpenScratchpadRequest},
     output::Output,
     registry::{
@@ -54,8 +58,12 @@ impl<H: Herdr> ScratchApp<H> {
 
     pub fn handle(&mut self, command: cli::Command) -> anyhow::Result<Output> {
         match command {
-            cli::Command::Toggle(args) => self.toggle(args.name.as_deref()),
-            cli::Command::Open(args) => self.open(args.name.as_deref()),
+            cli::Command::Toggle(args) => {
+                self.toggle(args.name.as_deref(), command_override(args.command))
+            }
+            cli::Command::Open(args) => {
+                self.open(args.name.as_deref(), command_override(args.command))
+            }
             cli::Command::Focus(args) => self.focus(args.name.as_deref()),
             cli::Command::Hide(args) => self.hide(args.name.as_deref()),
             cli::Command::Close(args) => self.close(args.name.as_deref()),
@@ -71,9 +79,7 @@ impl<H: Herdr> ScratchApp<H> {
                 report: self.doctor(),
                 json: args.json,
             }),
-            cli::Command::Config(cli::PathArgs {
-                command: cli::PathSubcommand::Path,
-            }) => Ok(Output::Text(self.paths.config_file.display().to_string())),
+            cli::Command::Config(args) => self.config_command(args),
             cli::Command::State(cli::PathArgs {
                 command: cli::PathSubcommand::Path,
             }) => Ok(Output::Text(self.paths.registry_file.display().to_string())),
@@ -81,7 +87,11 @@ impl<H: Herdr> ScratchApp<H> {
         }
     }
 
-    fn toggle(&mut self, name: Option<&str>) -> anyhow::Result<Output> {
+    fn toggle(
+        &mut self,
+        name: Option<&str>,
+        command: Option<Vec<String>>,
+    ) -> anyhow::Result<Output> {
         let current = self.herdr.current_pane().ok();
         let target = self.target(name, current.as_ref())?;
         if self
@@ -96,13 +106,13 @@ impl<H: Herdr> ScratchApp<H> {
         {
             return self.hide_by_target(target);
         }
-        self.activate_or_open(target, current)
+        self.activate_or_open(target, current, command)
     }
 
-    fn open(&mut self, name: Option<&str>) -> anyhow::Result<Output> {
+    fn open(&mut self, name: Option<&str>, command: Option<Vec<String>>) -> anyhow::Result<Output> {
         let current = self.herdr.current_pane().ok();
         let target = self.target(name, current.as_ref())?;
-        self.activate_or_open(target, current)
+        self.activate_or_open(target, current, command)
     }
 
     fn focus(&mut self, name: Option<&str>) -> anyhow::Result<Output> {
@@ -228,6 +238,7 @@ impl<H: Herdr> ScratchApp<H> {
         &mut self,
         target: Target,
         previous: Option<crate::herdr::PaneInfo>,
+        command: Option<Vec<String>>,
     ) -> anyhow::Result<Output> {
         let existing = self.registry.scratchpads.get(&target.key).cloned();
         if self.config.behavior.reuse_existing {
@@ -244,7 +255,12 @@ impl<H: Herdr> ScratchApp<H> {
             }
         }
 
-        let record = self.create_record(target, previous.map(FocusSnapshot::from), existing)?;
+        let record = self.create_record(
+            target,
+            previous.map(FocusSnapshot::from),
+            existing,
+            command.as_deref(),
+        )?;
         let name = record.name.clone();
         self.registry
             .insert(registry_key(&record.scope, &record.name), record);
@@ -257,6 +273,7 @@ impl<H: Herdr> ScratchApp<H> {
         target: Target,
         previous_focus: Option<FocusSnapshot>,
         previous_record: Option<ScratchpadRecord>,
+        command_override: Option<&[String]>,
     ) -> anyhow::Result<ScratchpadRecord> {
         let scratch_config = self.config.scratchpad(&target.name);
         let profile = self.config.profile(&scratch_config.profile);
@@ -267,10 +284,11 @@ impl<H: Herdr> ScratchApp<H> {
             "HERDR_SCRATCH_PROFILE".to_string(),
             scratch_config.profile.clone(),
         );
-        if !profile.command.is_empty() {
+        let launch_command = launch_command(&profile, command_override);
+        if !launch_command.is_empty() {
             env.insert(
                 "HERDR_SCRATCH_COMMAND_JSON".to_string(),
-                serde_json::to_string(&profile.command)?,
+                serde_json::to_string(&launch_command)?,
             );
         }
         for (key, value) in profile.env {
@@ -406,6 +424,63 @@ impl<H: Herdr> ScratchApp<H> {
         self.store.save(&self.registry)
     }
 
+    fn config_command(&mut self, args: cli::ConfigArgs) -> anyhow::Result<Output> {
+        match args.command {
+            cli::ConfigSubcommand::Path => {
+                Ok(Output::Text(self.paths.config_file.display().to_string()))
+            }
+            cli::ConfigSubcommand::Init(args) => self.config_init(args.force),
+            cli::ConfigSubcommand::Add(args) => self.config_add(args),
+        }
+    }
+
+    fn config_init(&mut self, force: bool) -> anyhow::Result<Output> {
+        if self.paths.config_file.exists() && !force {
+            anyhow::bail!(
+                "config already exists at {}; pass --force to overwrite",
+                self.paths.config_file.display()
+            );
+        }
+        self.config = Config::default();
+        self.config.save(&self.paths.config_file)?;
+        Ok(Output::Text(format!(
+            "initialized config {}",
+            self.paths.config_file.display()
+        )))
+    }
+
+    fn config_add(&mut self, args: cli::ConfigAddArgs) -> anyhow::Result<Output> {
+        let name = normalize_name(&args.name)?;
+        if self.config.profiles.contains_key(&name) || self.config.scratchpads.contains_key(&name) {
+            anyhow::bail!("scratchpad/profile `{name}` already exists");
+        }
+        let scope = parse_scope(args.scope.as_deref())?;
+        let cwd = parse_cwd(args.cwd.as_deref());
+        let command = command_override(args.command)
+            .ok_or_else(|| anyhow::anyhow!("config add requires a command after --"))?;
+
+        self.config.profiles.insert(
+            name.clone(),
+            ProfileConfig {
+                command,
+                cwd,
+                env: HashMap::new(),
+            },
+        );
+        self.config.scratchpads.insert(
+            name.clone(),
+            ScratchpadConfig {
+                profile: name.clone(),
+                scope: Some(scope),
+            },
+        );
+        self.config.save(&self.paths.config_file)?;
+        Ok(Output::Text(format!(
+            "added scratchpad `{name}` to {}",
+            self.paths.config_file.display()
+        )))
+    }
+
     fn target(
         &self,
         requested_name: Option<&str>,
@@ -534,6 +609,39 @@ fn resolve_cwd(profile: &ProfileConfig, context: &InvocationContext) -> Option<S
     }
 }
 
+fn command_override(command: Vec<String>) -> Option<Vec<String>> {
+    if command.is_empty() {
+        None
+    } else {
+        Some(command)
+    }
+}
+
+fn launch_command(profile: &ProfileConfig, command_override: Option<&[String]>) -> Vec<String> {
+    command_override
+        .filter(|command| !command.is_empty())
+        .map(|command| command.to_vec())
+        .unwrap_or_else(|| profile.command.clone())
+}
+
+fn parse_scope(raw: Option<&str>) -> anyhow::Result<ScopeKind> {
+    match raw.unwrap_or("workspace") {
+        "global" => Ok(ScopeKind::Global),
+        "workspace" => Ok(ScopeKind::Workspace),
+        "cwd" => Ok(ScopeKind::Cwd),
+        other => anyhow::bail!("invalid scope `{other}`; expected global, workspace, or cwd"),
+    }
+}
+
+fn parse_cwd(raw: Option<&str>) -> CwdMode {
+    match raw.unwrap_or("context") {
+        "context" => CwdMode::Context,
+        "workspace" => CwdMode::Workspace,
+        "home" => CwdMode::Home,
+        path => CwdMode::Path(path.to_string()),
+    }
+}
+
 fn normalize_name(raw: &str) -> anyhow::Result<String> {
     let name = raw.trim();
     if name.is_empty() {
@@ -604,5 +712,39 @@ mod tests {
         let scope = resolve_scope(ScopeKind::Cwd, &context);
         assert_eq!(scope.kind, "cwd");
         assert_eq!(scope.key, "/repo");
+    }
+
+    #[test]
+    fn launch_command_prefers_one_shot_override() {
+        let profile = ProfileConfig {
+            command: vec!["bash".into()],
+            cwd: CwdMode::Context,
+            env: Default::default(),
+        };
+        let override_command = vec!["lazygit".to_string()];
+        assert_eq!(
+            launch_command(&profile, Some(&override_command)),
+            vec!["lazygit"]
+        );
+    }
+
+    #[test]
+    fn launch_command_uses_profile_without_override() {
+        let profile = ProfileConfig {
+            command: vec!["python".into()],
+            cwd: CwdMode::Context,
+            env: Default::default(),
+        };
+        assert_eq!(launch_command(&profile, None), vec!["python"]);
+    }
+
+    #[test]
+    fn parse_config_add_defaults() {
+        assert_eq!(parse_scope(None).unwrap(), ScopeKind::Workspace);
+        assert!(matches!(parse_cwd(None), CwdMode::Context));
+        assert!(matches!(
+            parse_cwd(Some("/tmp/project")),
+            CwdMode::Path(path) if path == "/tmp/project"
+        ));
     }
 }

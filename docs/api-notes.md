@@ -35,6 +35,7 @@ There is no Herdr-managed storage API in v1. `HERDR_PLUGIN_CONFIG_DIR` and
 `herdr-scratch` declares:
 
 - public actions: `toggle`, `open`, `list`, `doctor`
+- named convenience actions: `lazygit`, `notes`
 - one internal pane entrypoint: `scratch`
 
 The pane entrypoint runs the scratchpad session process. Users should invoke

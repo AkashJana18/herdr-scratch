@@ -36,6 +36,20 @@ description = "Validate Herdr Scratch configuration and runtime connectivity."
 contexts = ["global", "workspace", "tab", "pane"]
 command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-scratch\" doctor"]
 
+[[actions]]
+id = "lazygit"
+title = "Toggle lazygit"
+description = "Open or focus a lazygit scratchpad in the current Herdr context."
+contexts = ["workspace", "tab", "pane"]
+command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-scratch\" toggle lazygit -- lazygit"]
+
+[[actions]]
+id = "notes"
+title = "Toggle notes"
+description = "Open or focus a notes scratchpad."
+contexts = ["workspace", "tab", "pane"]
+command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-scratch\" toggle notes"]
+
 [[panes]]
 id = "scratch"
 title = "Scratch"
