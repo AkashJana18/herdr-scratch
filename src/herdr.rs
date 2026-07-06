@@ -6,7 +6,17 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::registry::{FocusSnapshot, RuntimeHandle};
+use crate::{
+    config::{ScratchpadPlacement, SplitDirection},
+    registry::{FocusSnapshot, RuntimeHandle},
+};
+
+#[cfg(unix)]
+use std::{
+    io::{BufRead, BufReader, Write},
+    os::unix::net::UnixStream,
+    path::PathBuf,
+};
 
 pub const PLUGIN_ID: &str = "herdr.scratch";
 const ENTRYPOINT: &str = "scratch";
@@ -19,6 +29,7 @@ pub trait Herdr {
     fn focus_handle(&self, handle: &RuntimeHandle) -> Result<(), HerdrError>;
     fn focus_previous(&self, previous: &FocusSnapshot) -> Result<(), HerdrError>;
     fn open_scratchpad(&self, request: OpenScratchpadRequest) -> Result<RuntimeHandle, HerdrError>;
+    fn rename_handle(&self, handle: &RuntimeHandle, title: &str) -> Result<(), HerdrError>;
     fn close_handle(&self, handle: &RuntimeHandle) -> Result<(), HerdrError>;
     fn send_text(&self, handle: &RuntimeHandle, text: &str) -> Result<(), HerdrError>;
     fn run_command(&self, handle: &RuntimeHandle, command: &str) -> Result<(), HerdrError>;
@@ -73,6 +84,36 @@ impl HerdrCli {
         }
         Ok(())
     }
+
+    fn focus_pane_by_id(&self, pane_id: &str) -> Result<(), HerdrError> {
+        #[cfg(unix)]
+        {
+            let socket_path = std::env::var_os("HERDR_SOCKET_PATH")
+                .map(PathBuf::from)
+                .ok_or_else(|| {
+                    HerdrError::Unsupported(
+                        "HERDR_SOCKET_PATH is not set; cannot focus an exact pane".to_string(),
+                    )
+                })?;
+            let request = serde_json::json!({
+                "id": "herdr-scratch:pane-focus",
+                "method": "pane.focus",
+                "params": {
+                    "pane_id": pane_id,
+                },
+            });
+            let response = socket_request(&socket_path, &request)?;
+            parse_result(response)?;
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = pane_id;
+            Err(HerdrError::Unsupported(
+                "exact pane focus is only implemented for Unix sockets".to_string(),
+            ))
+        }
+    }
 }
 
 impl Herdr for HerdrCli {
@@ -117,6 +158,11 @@ impl Herdr for HerdrCli {
     }
 
     fn focus_previous(&self, previous: &FocusSnapshot) -> Result<(), HerdrError> {
+        if let Some(pane_id) = previous.pane_id.as_deref() {
+            if self.focus_pane_by_id(pane_id).is_ok() {
+                return Ok(());
+            }
+        }
         if let Some(focus_token) = previous.focus_token.as_deref() {
             self.run_ok(&["tab".into(), "focus".into(), focus_token.into()])?;
             return Ok(());
@@ -136,9 +182,13 @@ impl Herdr for HerdrCli {
             "--entrypoint".to_string(),
             ENTRYPOINT.to_string(),
             "--placement".to_string(),
-            "tab".to_string(),
+            request.placement.as_str().to_string(),
             "--focus".to_string(),
         ];
+        if request.placement == ScratchpadPlacement::Split {
+            args.push("--direction".to_string());
+            args.push(request.split_direction.as_str().to_string());
+        }
         if let Some(cwd) = request.cwd {
             args.push("--cwd".to_string());
             args.push(cwd);
@@ -160,10 +210,17 @@ impl Herdr for HerdrCli {
                 ),
                 (
                     "surface".to_string(),
-                    serde_json::Value::String("auto".to_string()),
+                    serde_json::Value::String(request.placement.as_str().to_string()),
                 ),
             ]),
         })
+    }
+
+    fn rename_handle(&self, handle: &RuntimeHandle, title: &str) -> Result<(), HerdrError> {
+        let Some(pane_id) = handle.pane_id.as_deref() else {
+            return Err(HerdrError::MissingHandle("pane_id"));
+        };
+        self.run_ok(&["pane".into(), "rename".into(), pane_id.into(), title.into()])
     }
 
     fn close_handle(&self, handle: &RuntimeHandle) -> Result<(), HerdrError> {
@@ -202,6 +259,8 @@ impl Herdr for HerdrCli {
 pub struct OpenScratchpadRequest {
     pub cwd: Option<String>,
     pub env: BTreeMap<String, String>,
+    pub placement: ScratchpadPlacement,
+    pub split_direction: SplitDirection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -245,12 +304,40 @@ pub enum HerdrError {
     },
     #[error("Herdr API returned an error: {0}")]
     Api(serde_json::Value),
+    #[error("Herdr socket request failed: {0}")]
+    Socket(std::io::Error),
     #[error("Herdr response did not contain {0}")]
     MissingField(&'static str),
     #[error("runtime handle is missing {0}")]
     MissingHandle(&'static str),
     #[error("{0}")]
     Unsupported(String),
+}
+
+#[cfg(unix)]
+fn socket_request(
+    socket_path: &PathBuf,
+    request: &serde_json::Value,
+) -> Result<serde_json::Value, HerdrError> {
+    let mut stream = UnixStream::connect(socket_path).map_err(HerdrError::Socket)?;
+    stream
+        .write_all(request.to_string().as_bytes())
+        .map_err(HerdrError::Socket)?;
+    stream.write_all(b"\n").map_err(HerdrError::Socket)?;
+    stream.flush().map_err(HerdrError::Socket)?;
+
+    let mut line = String::new();
+    let mut reader = BufReader::new(stream);
+    let read = reader.read_line(&mut line).map_err(HerdrError::Socket)?;
+    if read == 0 || line.trim().is_empty() {
+        return Err(HerdrError::Unsupported(
+            "Herdr socket returned an empty response".to_string(),
+        ));
+    }
+    serde_json::from_str(&line).map_err(|source| HerdrError::InvalidJson {
+        stdout: line,
+        source,
+    })
 }
 
 fn parse_result(value: serde_json::Value) -> Result<serde_json::Value, HerdrError> {

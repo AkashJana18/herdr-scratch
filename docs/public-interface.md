@@ -47,6 +47,8 @@ toggle_returns_to_previous = true
 reuse_existing = true
 restore_last_cwd = true
 close_confirmation = true
+placement = "split"
+split_direction = "right"
 
 [ui]
 title_template = "scratch:{name}"
@@ -66,6 +68,10 @@ scope = "workspace"
 ```
 
 Supported scopes are `global`, `workspace`, and `cwd`.
+
+Default scratchpads open as focused split panes in the current tab. The public
+interface remains scratchpad-oriented; placement values are configuration hints,
+not stable Herdr layout handles.
 
 ## Registry
 

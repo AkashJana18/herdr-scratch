@@ -91,6 +91,8 @@ pub struct BehaviorConfig {
     pub reuse_existing: bool,
     pub restore_last_cwd: bool,
     pub close_confirmation: bool,
+    pub placement: ScratchpadPlacement,
+    pub split_direction: SplitDirection,
 }
 
 impl Default for BehaviorConfig {
@@ -100,6 +102,42 @@ impl Default for BehaviorConfig {
             reuse_existing: true,
             restore_last_cwd: true,
             close_confirmation: true,
+            placement: ScratchpadPlacement::Split,
+            split_direction: SplitDirection::Right,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ScratchpadPlacement {
+    #[default]
+    Split,
+    Tab,
+}
+
+impl ScratchpadPlacement {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Split => "split",
+            Self::Tab => "tab",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SplitDirection {
+    #[default]
+    Right,
+    Down,
+}
+
+impl SplitDirection {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Right => "right",
+            Self::Down => "down",
         }
     }
 }
@@ -234,6 +272,8 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.default_scratchpad, "scratch");
         assert_eq!(config.scope.default, ScopeKind::Workspace);
+        assert_eq!(config.behavior.placement, ScratchpadPlacement::Split);
+        assert_eq!(config.behavior.split_direction, SplitDirection::Right);
         assert!(config.profiles.contains_key("default"));
     }
 
@@ -251,6 +291,22 @@ default = "cwd"
         .unwrap();
         assert_eq!(config.default_scratchpad, "notes");
         assert_eq!(config.scope.default, ScopeKind::Cwd);
+    }
+
+    #[test]
+    fn parses_scratchpad_surface_behavior() {
+        let config: Config = toml::from_str(
+            r#"
+version = 1
+
+[behavior]
+placement = "tab"
+split_direction = "down"
+        "#,
+        )
+        .unwrap();
+        assert_eq!(config.behavior.placement, ScratchpadPlacement::Tab);
+        assert_eq!(config.behavior.split_direction, SplitDirection::Down);
     }
 
     #[test]

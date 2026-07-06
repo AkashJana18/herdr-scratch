@@ -60,11 +60,12 @@ Current adapter operations use Herdr CLI commands:
 ```text
 herdr pane current
 herdr pane get <pane_id>
+herdr pane rename <pane_id> <label>
 herdr pane send-text <pane_id> <text>
 herdr pane run <pane_id> <command>
 herdr tab get <tab_id>
 herdr tab focus <tab_id>
-herdr plugin pane open --plugin herdr.scratch --entrypoint scratch ...
+herdr plugin pane open --plugin herdr.scratch --entrypoint scratch --placement split --direction right ...
 herdr plugin pane focus <pane_id>
 herdr plugin pane close <pane_id>
 ```
@@ -72,6 +73,11 @@ herdr plugin pane close <pane_id>
 Commands that return JSON use Herdr's standard response envelope. Commands that
 only acknowledge success may produce no stdout; the adapter treats an empty
 successful response as `Ok`.
+
+The Herdr CLI does not expose exact `pane.focus <pane_id>` as a CLI command, but
+the socket API exposes `pane.focus`. `herdr-scratch` uses that socket method
+when `HERDR_SOCKET_PATH` is available so `hide` can return to the previous pane
+inside the same tab.
 
 ## Relevant Socket Methods
 
@@ -98,6 +104,7 @@ scratchpad API should not change when that happens.
 | --- | --- | --- |
 | Create plugin-managed terminal | Yes | Use adapter `open_scratchpad` |
 | Focus plugin pane | Yes | Validate handle, then focus |
+| Rename plugin pane | Yes | Apply `ui.title_template` to pane label |
 | Query pane by ID | Yes | `pane.get` |
 | Query tab by ID | Yes | `tab.get` through opaque focus token |
 | Persist plugin state | Yes, plugin-owned files | `registry.json` |

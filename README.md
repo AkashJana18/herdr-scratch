@@ -69,6 +69,8 @@ toggle_returns_to_previous = true
 reuse_existing = true
 restore_last_cwd = true
 close_confirmation = true
+placement = "split"
+split_direction = "right"
 
 [ui]
 title_template = "scratch:{name}"

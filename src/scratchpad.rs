@@ -190,6 +190,9 @@ impl<H: Herdr> ScratchApp<H> {
         for key in keys {
             let mut record = self.registry.remove(&key).expect("key came from registry");
             record.name = new.clone();
+            if let Some(handle) = record.handle.as_ref() {
+                self.rename_handle_best_effort(handle, &self.title_for(&new));
+            }
             let new_key = registry_key(&record.scope, &new);
             self.registry.insert(new_key, record);
         }
@@ -231,6 +234,7 @@ impl<H: Herdr> ScratchApp<H> {
             if let Some(record) = existing.as_ref() {
                 if let Some(handle) = record.handle.as_ref() {
                     if self.ensure_live(handle).is_ok() {
+                        self.rename_handle_best_effort(handle, &self.title_for(&target.name));
                         self.herdr.focus_handle(handle)?;
                         self.update_visible(&target.key, previous.map(FocusSnapshot::from));
                         self.save()?;
@@ -275,7 +279,10 @@ impl<H: Herdr> ScratchApp<H> {
         let handle = self.herdr.open_scratchpad(OpenScratchpadRequest {
             cwd: cwd.clone(),
             env,
+            placement: self.config.behavior.placement,
+            split_direction: self.config.behavior.split_direction,
         })?;
+        self.rename_handle_best_effort(&handle, &self.title_for(&target.name));
         let now = now_rfc3339();
         Ok(ScratchpadRecord {
             name: target.name,
@@ -342,6 +349,20 @@ impl<H: Herdr> ScratchApp<H> {
             record.last_shown_at = now_rfc3339();
             record.previous_focus = previous;
         }
+    }
+
+    fn title_for(&self, name: &str) -> String {
+        let title = self.config.ui.title_template.replace("{name}", name);
+        let title = title.trim();
+        if title.is_empty() {
+            name.to_string()
+        } else {
+            title.to_string()
+        }
+    }
+
+    fn rename_handle_best_effort(&self, handle: &RuntimeHandle, title: &str) {
+        let _ = self.herdr.rename_handle(handle, title);
     }
 
     fn summaries(&self) -> Vec<ScratchpadSummary> {
