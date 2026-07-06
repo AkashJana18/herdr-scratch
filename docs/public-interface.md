@@ -7,8 +7,8 @@ private and may change without changing this interface.
 ## CLI
 
 ```text
-herdr-scratch toggle [name]
-herdr-scratch open [name]
+herdr-scratch toggle [name] [-- <command>...]
+herdr-scratch open [name] [-- <command>...]
 herdr-scratch focus [name]
 herdr-scratch hide [name]
 herdr-scratch close [name]
@@ -19,6 +19,8 @@ herdr-scratch send <name> <text>
 herdr-scratch run <name> <command>
 herdr-scratch doctor [--json]
 herdr-scratch config path
+herdr-scratch config init [--force]
+herdr-scratch config add <name> [--scope workspace|cwd|global] [--cwd context|workspace|home|PATH] -- <command>...
 herdr-scratch state path
 ```
 
@@ -47,6 +49,8 @@ toggle_returns_to_previous = true
 reuse_existing = true
 restore_last_cwd = true
 close_confirmation = true
+placement = "split"
+split_direction = "right"
 
 [ui]
 title_template = "scratch:{name}"
@@ -66,6 +70,10 @@ scope = "workspace"
 ```
 
 Supported scopes are `global`, `workspace`, and `cwd`.
+
+Default scratchpads open as focused split panes in the current tab. The public
+interface remains scratchpad-oriented; placement values are configuration hints,
+not stable Herdr layout handles.
 
 ## Registry
 
@@ -91,6 +99,8 @@ Public action IDs:
 ```text
 herdr.scratch.toggle
 herdr.scratch.open
+herdr.scratch.lazygit
+herdr.scratch.notes
 herdr.scratch.list
 herdr.scratch.doctor
 ```
@@ -113,6 +123,18 @@ key = "prefix+shift+p"
 type = "plugin_action"
 command = "herdr.scratch.list"
 description = "list scratchpads"
+
+[[keys.command]]
+key = "prefix+g"
+type = "plugin_action"
+command = "herdr.scratch.lazygit"
+description = "toggle lazygit scratchpad"
+
+[[keys.command]]
+key = "prefix+n"
+type = "plugin_action"
+command = "herdr.scratch.notes"
+description = "toggle notes scratchpad"
 ```
 
 The plugin does not edit Herdr keybindings automatically.

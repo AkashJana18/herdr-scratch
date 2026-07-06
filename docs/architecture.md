@@ -82,6 +82,10 @@ represented inside Herdr. Today the adapter uses documented Herdr CLI commands.
 Future implementations can use richer socket APIs or native Herdr surfaces
 without changing the public CLI/config contract.
 
+The current default backend opens scratchpads as focused split panes in the
+current tab. This keeps scratchpads attached to the active work context while
+the registry still stores only opaque runtime handles.
+
 Required adapter operations:
 
 - detect Herdr availability
@@ -90,6 +94,7 @@ Required adapter operations:
 - focus a runtime handle
 - focus the previous context
 - open a scratchpad runtime
+- rename a scratchpad runtime
 - close a scratchpad runtime
 - send text
 - run a command
