@@ -52,7 +52,7 @@ Herdr plugins cannot currently:
   lifecycle operation
 - rely on Herdr-managed plugin storage beyond path discovery
 
-## Overlay Findings
+## Popup and Overlay Findings
 
 Overlay behavior was the critical uncertainty.
 
@@ -65,9 +65,14 @@ the overlay pane exits.
 removes plugin pane records, removes unattached terminal state, schedules a
 session save, emits close events, and shuts detached terminal runtimes.
 
-Conclusion: current overlays are not suitable for Floax-style persistent
-hide/restore semantics. A scratchpad that needs to stay alive should be modeled
-as a logical scratchpad with an opaque runtime handle, not as a public overlay.
+Herdr 0.7.4 added real session-modal popups with configurable cell or percentage
+dimensions. A popup does not change the tab layout, but its process is still
+terminated when the popup closes and it has no pane ID or lifecycle events.
+
+Herdr's direct terminal attach supplies the missing separation: the persistent
+terminal can live in a private named Herdr session while a short-lived popup
+attaches to it. `ctrl+b q` detaches the viewer, closes the popup command, and
+leaves the backing terminal running.
 
 ## Floax Analysis
 
@@ -107,14 +112,14 @@ Ideas not to copy directly:
 | Feature | Floax | Herdr today | Possible in plugin? | Needs Herdr core? |
 | --- | --- | --- | --- | --- |
 | Persistent scratchpads | tmux named session | live pane/runtime | Yes, with registry | No |
-| Popup overlays | `tmux popup` | temporary overlay pane | Partially | Yes, for true hide/restore |
+| Popup overlays | `tmux popup` | session-modal popup | Yes, with attached backing terminal | No |
 | Toggle | attach/detach | focus/return | Yes | No |
 | Fullscreen | popup size | zoom/layout | Partially | No |
 | Named sessions | tmux session name | plugin registry name | Yes | No |
 | Current working directory | `pane_current_path` | context/current pane cwd | Yes | No |
 | Session persistence | tmux server | Herdr runtime/session persistence | Partially | Maybe |
 | Restore existing session | attach named session | focus live handle | Yes if live | No |
-| Hidden tab | native popup detach | no hidden tab API | No | Yes |
+| Hidden tab | native popup detach | private named-session terminal | Yes | No |
 | Configuration | tmux options | plugin TOML | Yes | No |
 | Keyboard shortcuts | tmux binds | Herdr keybindings | Yes | No |
 | Project-local config | tmux manual | plugin scope/profile | Yes | No |
@@ -154,11 +159,13 @@ operations and stores opaque handles in the registry.
 
 Can `herdr-scratch` be implemented today?
 
-**PARTIALLY.**
+**YES.**
 
-A production-quality persistent scratchpad manager can be implemented using
-Herdr's current plugin and pane APIs. Exact Floax popup hide/restore semantics
-need additional Herdr core support.
+A production-quality persistent popup scratchpad can be implemented using
+Herdr 0.7.4's popup placement, named persistent sessions, and direct terminal
+attach. No plugin-owned PTY daemon or visible backing tab is required. The
+remaining UX difference is that users hide an active popup with Herdr's native
+`ctrl+b q` detach chord because popup input does not reach plugin keybindings.
 
 ## Recommended Next Step
 

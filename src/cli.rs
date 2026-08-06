@@ -40,6 +40,9 @@ pub enum Command {
     /// Internal pane entrypoint.
     #[command(hide = true)]
     Session,
+    /// Internal popup attachment entrypoint.
+    #[command(hide = true)]
+    Attach,
 }
 
 #[derive(Debug, Args)]

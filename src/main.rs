@@ -17,11 +17,17 @@ fn main() {
 }
 
 fn run(args: cli::Cli) -> anyhow::Result<()> {
+    if matches!(&args.command, cli::Command::Session) {
+        return scratchpad::run_runtime_session();
+    }
     let paths = config::Paths::discover().context("failed to discover plugin paths")?;
+    if matches!(&args.command, cli::Command::Attach) {
+        return scratchpad::run_popup_attach(paths);
+    }
+    let store = registry::RegistryStore::new(paths.registry_file.clone());
+    let _registry_lock = store.lock().context("failed to lock registry")?;
     let config = config::Config::load(&paths.config_file).context("failed to load config")?;
-    let registry = registry::RegistryStore::new(paths.registry_file.clone())
-        .load()
-        .context("failed to load registry")?;
+    let registry = store.load().context("failed to load registry")?;
     let herdr = herdr::HerdrCli::discover();
 
     let mut app = scratchpad::ScratchApp::new(config, registry, paths, herdr);

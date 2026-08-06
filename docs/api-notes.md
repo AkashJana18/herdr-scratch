@@ -37,9 +37,11 @@ There is no Herdr-managed storage API in v1. `HERDR_PLUGIN_CONFIG_DIR` and
 - public actions: `toggle`, `open`, `list`, `doctor`
 - named convenience actions: `lazygit`, `notes`
 - one internal pane entrypoint: `scratch`
+- one internal popup viewer entrypoint: `popup`
 
-The pane entrypoint runs the scratchpad session process. Users should invoke
-public actions or CLI commands.
+The runtime entrypoint runs the persistent scratchpad process; the popup
+entrypoint attaches a viewer to its terminal. Users should invoke public actions
+or CLI commands.
 
 ## Command Resolution Notes
 
@@ -73,7 +75,10 @@ herdr pane send-text <pane_id> <text>
 herdr pane run <pane_id> <command>
 herdr tab get <tab_id>
 herdr tab focus <tab_id>
-herdr plugin pane open --plugin herdr.scratch --entrypoint scratch --placement split --direction right ...
+herdr --session herdr-scratch workspace create --label scratch:NAME --no-focus ...
+herdr --session herdr-scratch plugin pane open --plugin herdr.scratch --entrypoint scratch --placement tab ...
+herdr plugin pane open --plugin herdr.scratch --entrypoint popup --placement popup --width 80% --height 80% ...
+herdr --session herdr-scratch terminal attach <terminal_id>
 herdr plugin pane focus <pane_id>
 herdr plugin pane close <pane_id>
 ```
@@ -119,8 +124,10 @@ scratchpad API should not change when that happens.
 | Store config | Yes, plugin-owned files | `config.toml` |
 | Receive invocation context | Yes | `HERDR_PLUGIN_CONTEXT_JSON` |
 | Know workspace/cwd | Yes, from context/current pane | Resolve scope and cwd |
-| Hide Herdr tabs | No documented API | Public `hide` returns to previous context |
-| Reopen exact closed PTY | No documented plugin API | Treat closed handles as stale |
+| Hide Herdr tabs | No hidden-tab API needed | Keep backing terminals in a private named session |
+| Floating popup | Yes since 0.7.4 | Open a popup direct-attach viewer |
+| Persist after popup detach | Yes through direct attach | Keep the server-owned backing terminal alive |
+| Reopen exact closed PTY | No | Treat a terminated backing handle as stale |
 
 ## Overlay Investigation Summary
 
@@ -129,8 +136,11 @@ showed overlays are temporary zoomed panes tracked internally by Herdr. Closing 
 plugin pane delegates to the generic pane close path, removes plugin pane
 records, removes unattached terminal state, and shuts detached runtimes.
 
-Therefore, `herdr-scratch` must not promise true popup hide/restore semantics
-until Herdr exposes a documented API for that lifecycle.
+Herdr 0.7.4 added a distinct session-modal popup surface. Closing that popup
+still shuts down the popup runtime, so the plugin does not run the scratchpad
+shell directly inside it. Instead, it runs the shell in a private named Herdr
+session and uses `terminal attach` inside the popup. Detaching the attach client
+ends the popup command while preserving the server-owned backing terminal.
 
 ## Stable Contract
 

@@ -1,7 +1,7 @@
 id = "herdr.scratch"
 name = "Scratch"
-version = "0.1.0"
-min_herdr_version = "0.7.0"
+version = "1.0.0"
+min_herdr_version = "0.7.4"
 description = "Persistent named scratchpads for Herdr"
 platforms = ["linux", "macos"]
 
@@ -53,5 +53,14 @@ command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" toggl
 [[panes]]
 id = "scratch"
 title = "Scratch"
-description = "Managed scratchpad session."
+description = "Persistent backing scratchpad runtime."
 command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" session"]
+
+[[panes]]
+id = "popup"
+title = "Scratch"
+description = "Floating scratchpad viewer. Detach with ctrl+b q."
+placement = "popup"
+width = "80%"
+height = "80%"
+command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" attach"]
