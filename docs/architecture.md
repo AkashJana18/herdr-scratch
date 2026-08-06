@@ -50,9 +50,10 @@ only.
 5. `scratchpad` resolves the requested name and scope from config plus Herdr
    invocation context.
 6. `herdr` validates any existing runtime handle.
-7. If the handle is live, `scratchpad` reuses it; otherwise it opens a new
-   runtime through the adapter.
-8. Registry state is updated and saved atomically.
+7. If a popup handle is live, `scratchpad` opens a direct-attach viewer in the
+   invoking session. Otherwise it creates a runtime in the private backing
+   session first.
+8. Registry state is updated and saved atomically under a process lock.
 
 ## State Model
 
@@ -84,9 +85,10 @@ represented inside Herdr. Today the adapter uses documented Herdr CLI commands.
 Future implementations can use richer socket APIs or native Herdr surfaces
 without changing the public CLI/config contract.
 
-The current default backend opens scratchpads as focused split panes in the
-current tab. This keeps scratchpads attached to the active work context while
-the registry still stores only opaque runtime handles.
+The default backend keeps scratchpad terminals in a private `herdr-scratch`
+named session and displays them through session-modal popup viewers in the
+invoking session. This keeps the active workspace layout unchanged while the
+runtime survives viewer detach. Existing split and tab handles remain valid.
 
 Required adapter operations:
 
@@ -96,6 +98,8 @@ Required adapter operations:
 - focus a runtime handle
 - focus the previous context
 - open a scratchpad runtime
+- attach a popup viewer to a backing terminal
+- close the active popup without closing its backing terminal
 - rename a scratchpad runtime
 - close a scratchpad runtime
 - send text
@@ -103,11 +107,11 @@ Required adapter operations:
 
 ## Lifecycle Semantics
 
-- `toggle`: show/focus a scratchpad, or return to previous context if it is
-  already active.
+- `toggle`: show a scratchpad popup, or hide it when an external caller targets
+  a currently attached popup.
 - `open`: create or show a scratchpad.
 - `focus`: focus only if it already exists.
-- `hide`: leave the scratchpad and return to previous context when possible.
+- `hide`: close the popup viewer while leaving the backing terminal running.
 - `close`: terminate and remove the live runtime handle.
 - `list` and `status`: report logical state, not backend details.
 
@@ -140,7 +144,8 @@ Supported extension points:
 
 ## Current Limitations
 
-- `hide` means "return to the previous Herdr context" when the current backend
-  cannot truly hide a live scratchpad.
+- Herdr routes all input to an open popup, so the plugin action keybinding
+  cannot fire from inside it. Use Herdr's direct-attach `ctrl+b q` chord.
+- Herdr supports one session-modal popup at a time per session.
 - There is no Herdr-managed plugin storage API; files are owned by the plugin.
 - Registry handles are best-effort and must always be validated.

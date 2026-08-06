@@ -36,6 +36,7 @@ pub struct Config {
     pub default_scratchpad: String,
     pub behavior: BehaviorConfig,
     pub ui: UiConfig,
+    pub runtime: RuntimeConfig,
     pub scope: ScopeConfig,
     pub profiles: BTreeMap<String, ProfileConfig>,
     pub scratchpads: BTreeMap<String, ScratchpadConfig>,
@@ -54,6 +55,7 @@ impl Default for Config {
             default_scratchpad: "scratch".to_string(),
             behavior: BehaviorConfig::default(),
             ui: UiConfig::default(),
+            runtime: RuntimeConfig::default(),
             scope: ScopeConfig::default(),
             profiles,
             scratchpads,
@@ -68,6 +70,7 @@ impl Config {
         }
         let content = std::fs::read_to_string(path)?;
         let config: Self = toml::from_str(&content)?;
+        config.validate()?;
         Ok(config)
     }
 
@@ -91,6 +94,15 @@ impl Config {
     pub fn profile(&self, name: &str) -> ProfileConfig {
         self.profiles.get(name).cloned().unwrap_or_default()
     }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        self.ui.popup.width.validate("ui.popup.width")?;
+        self.ui.popup.height.validate("ui.popup.height")?;
+        if self.runtime.backing_session.trim().is_empty() {
+            anyhow::bail!("runtime.backing_session must not be empty");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,7 +123,7 @@ impl Default for BehaviorConfig {
             reuse_existing: true,
             restore_last_cwd: true,
             close_confirmation: true,
-            placement: ScratchpadPlacement::Split,
+            placement: ScratchpadPlacement::Popup,
             split_direction: SplitDirection::Right,
         }
     }
@@ -121,6 +133,7 @@ impl Default for BehaviorConfig {
 #[serde(rename_all = "snake_case")]
 pub enum ScratchpadPlacement {
     #[default]
+    Popup,
     Split,
     Tab,
 }
@@ -128,6 +141,7 @@ pub enum ScratchpadPlacement {
 impl ScratchpadPlacement {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Popup => "popup",
             Self::Split => "split",
             Self::Tab => "tab",
         }
@@ -156,6 +170,7 @@ impl SplitDirection {
 pub struct UiConfig {
     pub title_template: String,
     pub status_notifications: NotificationMode,
+    pub popup: PopupConfig,
 }
 
 impl Default for UiConfig {
@@ -163,6 +178,72 @@ impl Default for UiConfig {
         Self {
             title_template: "scratch:{name}".to_string(),
             status_notifications: NotificationMode::Errors,
+            popup: PopupConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PopupConfig {
+    pub width: PopupDimension,
+    pub height: PopupDimension,
+}
+
+impl Default for PopupConfig {
+    fn default() -> Self {
+        Self {
+            width: PopupDimension::Percent("80%".to_string()),
+            height: PopupDimension::Percent("80%".to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PopupDimension {
+    Cells(u16),
+    Percent(String),
+}
+
+impl PopupDimension {
+    pub fn as_arg(&self) -> String {
+        match self {
+            Self::Cells(value) => value.to_string(),
+            Self::Percent(value) => value.clone(),
+        }
+    }
+
+    fn validate(&self, field: &str) -> anyhow::Result<()> {
+        match self {
+            Self::Cells(0) => anyhow::bail!("{field} must be greater than zero"),
+            Self::Cells(_) => Ok(()),
+            Self::Percent(value) => {
+                let valid = value
+                    .strip_suffix('%')
+                    .and_then(|raw| raw.parse::<u16>().ok())
+                    .is_some_and(|value| (1..=100).contains(&value));
+                if !valid {
+                    anyhow::bail!(
+                        "{field} must be a positive cell count or percentage from 1% to 100%"
+                    );
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RuntimeConfig {
+    pub backing_session: String,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            backing_session: "herdr-scratch".to_string(),
         }
     }
 }
@@ -281,8 +362,10 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.default_scratchpad, "scratch");
         assert_eq!(config.scope.default, ScopeKind::Workspace);
-        assert_eq!(config.behavior.placement, ScratchpadPlacement::Split);
+        assert_eq!(config.behavior.placement, ScratchpadPlacement::Popup);
         assert_eq!(config.behavior.split_direction, SplitDirection::Right);
+        assert_eq!(config.ui.popup.width.as_arg(), "80%");
+        assert_eq!(config.runtime.backing_session, "herdr-scratch");
         assert!(config.profiles.contains_key("default"));
     }
 
@@ -316,6 +399,20 @@ split_direction = "down"
         .unwrap();
         assert_eq!(config.behavior.placement, ScratchpadPlacement::Tab);
         assert_eq!(config.behavior.split_direction, SplitDirection::Down);
+    }
+
+    #[test]
+    fn parses_popup_dimensions_as_percentages_or_cells() {
+        let config: Config = toml::from_str(
+            r#"
+[ui.popup]
+width = "90%"
+height = 42
+        "#,
+        )
+        .unwrap();
+        assert_eq!(config.ui.popup.width.as_arg(), "90%");
+        assert_eq!(config.ui.popup.height.as_arg(), "42");
     }
 
     #[test]

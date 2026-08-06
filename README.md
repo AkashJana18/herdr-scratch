@@ -13,6 +13,7 @@ prebuilt binaries from GitHub Releases, so users do not need Rust or Cargo.
 ## Features
 
 - Named scratchpads with `toggle`, `open`, `focus`, `hide`, and `close`.
+- Native 80% × 80% floating popups that detach without stopping their terminal.
 - One-shot command scratchpads, such as `open lazygit -- lazygit`.
 - Scoped scratchpads: `global`, `workspace`, or `cwd`.
 - Reuse of existing live scratchpads to avoid duplicates.
@@ -23,6 +24,12 @@ prebuilt binaries from GitHub Releases, so users do not need Rust or Cargo.
 - Backend adapter boundary so future Herdr surfaces can be adopted without
   changing the CLI or config.
 
+Popup scratchpads require Herdr 0.7.4 or newer. Their terminals live in a
+private `herdr-scratch` named session, so opening and hiding them does not add
+tabs or panes to the workspace you are using. Herdr currently supports one
+session-modal popup at a time; detach the active popup with `ctrl+b q` before
+opening another.
+
 ## Installation
 
 Install from GitHub:
@@ -32,7 +39,7 @@ herdr plugin install AkashJana18/herdr-scratch
 ```
 
 During installation Herdr runs `scripts/install-binary.sh`. The installer
-detects the current platform, downloads the matching `v0.1.0` release asset,
+detects the current platform, downloads the matching `v1.0.0` release asset,
 verifies the SHA256 checksum from `checksums.txt`, and installs the executable
 at:
 
@@ -107,12 +114,19 @@ toggle_returns_to_previous = true
 reuse_existing = true
 restore_last_cwd = true
 close_confirmation = true
-placement = "split"
+placement = "popup"
 split_direction = "right"
 
 [ui]
 title_template = "scratch:{name}"
 status_notifications = "errors"
+
+[ui.popup]
+width = "80%"
+height = "80%"
+
+[runtime]
+backing_session = "herdr-scratch"
 
 [scope]
 default = "workspace"
@@ -158,6 +172,10 @@ Toggle the default scratchpad:
 ```bash
 herdr-scratch toggle
 ```
+
+While the popup has focus, press `ctrl+b q` to hide it. This detaches the popup
+viewer but leaves the scratchpad shell or TUI running. Running `exit` inside the
+scratchpad terminates it permanently.
 
 Open a named scratchpad:
 
@@ -238,6 +256,10 @@ Placeholder: project-local scratchpad with custom profile.
 - `RuntimeHandle`: opaque Herdr runtime reference.
 - `Herdr` adapter: all Herdr-specific behavior is isolated behind a trait.
 
+Popup handles point to terminals in the private backing session. The popup is
+only a direct-attach viewer, so its process can come and go independently of
+the scratchpad runtime.
+
 The current implementation uses Herdr's documented CLI/plugin-pane APIs behind
 that adapter. Public commands, config, and registry lifecycle terms do not expose
 which Herdr surface is used internally.
@@ -264,8 +286,8 @@ is a development wrapper that delegates to `target/release/herdr-scratch`.
 4. Create and push a matching tag:
 
    ```bash
-   git tag v0.1.0
-   git push origin v0.1.0
+   git tag v1.0.0
+   git push origin v1.0.0
    ```
 
 5. GitHub Actions builds release binaries, generates `checksums.txt`, and
@@ -273,7 +295,7 @@ is a development wrapper that delegates to `target/release/herdr-scratch`.
 6. Verify a clean install:
 
    ```bash
-   herdr plugin install AkashJana18/herdr-scratch --ref v0.1.0
+   herdr plugin install AkashJana18/herdr-scratch --ref v1.0.0
    ```
 
 Design decisions and assumptions:

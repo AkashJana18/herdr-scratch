@@ -119,7 +119,10 @@ jobs:
             gh release upload "$tag" dist/* --clobber
           else
             gh release create "$tag" dist/* \
+              --verify-tag \
               --target "$GITHUB_SHA" \
               --title "herdr-scratch ${version}" \
-              --notes "Binary release for herdr-scratch ${version}."
+              --latest \
+              --generate-notes \
+              --notes "First stable release of the Floax-style persistent popup scratchpad experience for Herdr."
           fi

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     cli,
     config::{Config, CwdMode, Paths, ProfileConfig, ScopeKind, ScratchpadConfig},
-    herdr::{Herdr, OpenScratchpadRequest},
+    herdr::{Herdr, HerdrCli, OpenScratchpadRequest},
     output::Output,
     registry::{
         FocusSnapshot, LifecycleStatus, Registry, RegistryStore, RuntimeHandle, ScopeRecord,
@@ -28,6 +28,7 @@ pub struct ScratchpadSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DoctorReport {
     pub herdr_available: bool,
+    pub herdr_version: Option<String>,
     pub config_dir: String,
     pub config_path: String,
     pub state_dir: String,
@@ -68,7 +69,7 @@ impl<H: Herdr> ScratchApp<H> {
             cli::Command::Hide(args) => self.hide(args.name.as_deref()),
             cli::Command::Close(args) => self.close(args.name.as_deref()),
             cli::Command::List(args) => Ok(Output::Scratchpads {
-                scratchpads: self.summaries(),
+                scratchpads: self.summaries()?,
                 json: args.json,
             }),
             cli::Command::Status(args) => self.status(args.name.as_deref(), args.json),
@@ -83,7 +84,8 @@ impl<H: Herdr> ScratchApp<H> {
             cli::Command::State(cli::PathArgs {
                 command: cli::PathSubcommand::Path,
             }) => Ok(Output::Text(self.paths.registry_file.display().to_string())),
-            cli::Command::Session => self.session(),
+            cli::Command::Session => anyhow::bail!("session must be handled before app startup"),
+            cli::Command::Attach => anyhow::bail!("attach must be handled before app startup"),
         }
     }
 
@@ -94,6 +96,11 @@ impl<H: Herdr> ScratchApp<H> {
     ) -> anyhow::Result<Output> {
         let current = self.herdr.current_pane().ok();
         let target = self.target(name, current.as_ref())?;
+        if self.config.behavior.toggle_returns_to_previous
+            && self.store.viewer_is_active(&target.key)
+        {
+            return self.hide_by_target(target);
+        }
         if self
             .registry
             .scratchpads
@@ -125,7 +132,10 @@ impl<H: Herdr> ScratchApp<H> {
             anyhow::bail!("scratchpad `{}` has no live runtime", target.name);
         };
         self.ensure_live(handle)?;
-        self.herdr.focus_handle(handle)?;
+        if !self.store.viewer_is_active(&target.key) {
+            self.herdr
+                .show_handle(handle, &target.key, &self.config.ui.popup)?;
+        }
         self.update_visible(&target.key, current.map(FocusSnapshot::from));
         self.save()?;
         Ok(Output::Text(format!(
@@ -151,6 +161,9 @@ impl<H: Herdr> ScratchApp<H> {
         };
         if let Some(handle) = record.handle.as_ref() {
             // Closing a stale handle is allowed to become a registry cleanup.
+            if self.store.viewer_is_active(&target.key) {
+                let _ = self.herdr.hide_handle(handle);
+            }
             let _ = self.herdr.close_handle(handle);
         }
         record.status = LifecycleStatus::Closed;
@@ -164,6 +177,7 @@ impl<H: Herdr> ScratchApp<H> {
     fn status(&mut self, name: Option<&str>, json: bool) -> anyhow::Result<Output> {
         let current = self.herdr.current_pane().ok();
         let target = self.target(name, current.as_ref())?;
+        self.refresh_status(&target.key)?;
         let Some(record) = self.registry.scratchpads.get(&target.key) else {
             let summary = ScratchpadSummary {
                 name: target.name,
@@ -180,7 +194,7 @@ impl<H: Herdr> ScratchApp<H> {
                 })
             };
         };
-        let summary = summary_for(record);
+        let summary = self.summary_for_key(&target.key, record);
         if json {
             Ok(Output::Json(serde_json::to_value(summary)?))
         } else {
@@ -198,6 +212,9 @@ impl<H: Herdr> ScratchApp<H> {
             anyhow::bail!("scratchpad `{old}` does not exist");
         }
         for key in keys {
+            if self.store.viewer_is_active(&key) {
+                anyhow::bail!("hide scratchpad `{old}` before renaming it");
+            }
             let mut record = self.registry.remove(&key).expect("key came from registry");
             record.name = new.clone();
             if let Some(handle) = record.handle.as_ref() {
@@ -247,28 +264,51 @@ impl<H: Herdr> ScratchApp<H> {
             && self.ensure_live(handle).is_ok()
         {
             self.rename_handle_best_effort(handle, &self.title_for(&target.name));
-            self.herdr.focus_handle(handle)?;
+            if handle.is_popup() && self.store.viewer_is_active(&target.key) {
+                self.update_visible(&target.key, previous.map(FocusSnapshot::from));
+                self.save()?;
+                return Ok(Output::Text(format!(
+                    "scratchpad `{}` is already visible",
+                    target.name
+                )));
+            }
+            self.herdr
+                .show_handle(handle, &target.key, &self.config.ui.popup)?;
             self.update_visible(&target.key, previous.map(FocusSnapshot::from));
             self.save()?;
             return Ok(Output::Text(format!("opened scratchpad `{}`", target.name)));
         }
 
+        let previous_focus = previous.map(FocusSnapshot::from);
         let record = self.create_record(
-            target,
-            previous.map(FocusSnapshot::from),
+            &target,
+            previous_focus.clone(),
             existing,
             command.as_deref(),
         )?;
         let name = record.name.clone();
-        self.registry
-            .insert(registry_key(&record.scope, &record.name), record);
+        let handle = record
+            .handle
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("new scratchpad is missing its runtime handle"))?;
+        let key = target.key.clone();
+        self.registry.insert(key.clone(), record);
+        self.save()?;
+        if let Err(err) = self.herdr.show_handle(&handle, &key, &self.config.ui.popup) {
+            if let Some(record) = self.registry.scratchpads.get_mut(&key) {
+                record.status = LifecycleStatus::Available;
+            }
+            self.save()?;
+            return Err(err.into());
+        }
+        self.update_visible(&key, previous_focus);
         self.save()?;
         Ok(Output::Text(format!("opened scratchpad `{name}`")))
     }
 
     fn create_record(
         &self,
-        target: Target,
+        target: &Target,
         previous_focus: Option<FocusSnapshot>,
         previous_record: Option<ScratchpadRecord>,
         command_override: Option<&[String]>,
@@ -295,14 +335,16 @@ impl<H: Herdr> ScratchApp<H> {
         let handle = self.herdr.open_scratchpad(OpenScratchpadRequest {
             cwd: cwd.clone(),
             env,
+            title: self.title_for(&target.name),
+            backing_session: self.config.runtime.backing_session.clone(),
             placement: self.config.behavior.placement,
             split_direction: self.config.behavior.split_direction,
         })?;
         self.rename_handle_best_effort(&handle, &self.title_for(&target.name));
         let now = now_rfc3339();
         Ok(ScratchpadRecord {
-            name: target.name,
-            scope: target.scope,
+            name: target.name.clone(),
+            scope: target.scope.clone(),
             profile: scratch_config.profile,
             status: LifecycleStatus::Visible,
             handle: Some(handle),
@@ -324,8 +366,14 @@ impl<H: Herdr> ScratchApp<H> {
                 target.name
             )));
         };
-        if let Some(previous) = record.previous_focus.as_ref() {
-            let _ = self.herdr.focus_previous(previous);
+        if let Some(handle) = record.handle.as_ref() {
+            if handle.is_popup() {
+                if self.store.viewer_is_active(&target.key) {
+                    self.herdr.hide_handle(handle)?;
+                }
+            } else if let Some(previous) = record.previous_focus.as_ref() {
+                let _ = self.herdr.focus_previous(previous);
+            }
         }
         record.status = LifecycleStatus::Available;
         record.last_hidden_at = Some(now_rfc3339());
@@ -349,11 +397,13 @@ impl<H: Herdr> ScratchApp<H> {
     }
 
     fn ensure_live(&self, handle: &RuntimeHandle) -> anyhow::Result<()> {
-        let Some(pane_id) = handle.pane_id.as_deref() else {
+        let Some(_pane_id) = handle.pane_id.as_deref() else {
             anyhow::bail!("scratchpad runtime is missing a pane handle");
         };
-        self.herdr.pane_get(pane_id)?;
-        if let Some(focus_token) = handle.focus_token() {
+        self.herdr.handle_get(handle)?;
+        if !handle.is_popup()
+            && let Some(focus_token) = handle.focus_token()
+        {
             self.herdr.tab_get(focus_token)?;
         }
         Ok(())
@@ -381,17 +431,76 @@ impl<H: Herdr> ScratchApp<H> {
         let _ = self.herdr.rename_handle(handle, title);
     }
 
-    fn summaries(&self) -> Vec<ScratchpadSummary> {
-        self.registry
+    fn summaries(&mut self) -> anyhow::Result<Vec<ScratchpadSummary>> {
+        let keys = self
+            .registry
             .scratchpads
-            .values()
-            .map(summary_for)
-            .collect()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in keys {
+            self.refresh_status(&key)?;
+        }
+        Ok(self
+            .registry
+            .scratchpads
+            .iter()
+            .map(|(key, record)| self.summary_for_key(key, record))
+            .collect())
+    }
+
+    fn refresh_status(&mut self, key: &str) -> anyhow::Result<()> {
+        let Some(handle) = self
+            .registry
+            .scratchpads
+            .get(key)
+            .and_then(|record| record.handle.clone())
+        else {
+            return Ok(());
+        };
+        let next = if self.ensure_live(&handle).is_err() {
+            LifecycleStatus::Stale
+        } else if handle.is_popup() {
+            if self.store.viewer_is_active(key) {
+                LifecycleStatus::Visible
+            } else {
+                LifecycleStatus::Available
+            }
+        } else {
+            return Ok(());
+        };
+        if let Some(record) = self.registry.scratchpads.get_mut(key)
+            && record.status != next
+        {
+            record.status = next;
+            self.save()?;
+        }
+        Ok(())
+    }
+
+    fn summary_for_key(&self, key: &str, record: &ScratchpadRecord) -> ScratchpadSummary {
+        let mut summary = summary_for(record);
+        if record.handle.as_ref().is_some_and(RuntimeHandle::is_popup) {
+            summary.status = if matches!(
+                record.status,
+                LifecycleStatus::Stale | LifecycleStatus::Error
+            ) {
+                record.status.to_string()
+            } else if self.store.viewer_is_active(key) {
+                LifecycleStatus::Visible.to_string()
+            } else if record.handle.is_some() {
+                LifecycleStatus::Available.to_string()
+            } else {
+                record.status.to_string()
+            };
+        }
+        summary
     }
 
     fn doctor(&self) -> DoctorReport {
         let mut issues = Vec::new();
         let herdr_available = self.herdr.available();
+        let herdr_version = self.herdr.version();
         if !herdr_available {
             issues
                 .push("Herdr CLI is not available; set HERDR_BIN_PATH or add herdr to PATH".into());
@@ -402,8 +511,16 @@ impl<H: Herdr> ScratchApp<H> {
                 self.config.version
             ));
         }
+        if self.config.behavior.placement == crate::config::ScratchpadPlacement::Popup
+            && herdr_version
+                .as_deref()
+                .is_some_and(|version| !herdr_supports_popup(version))
+        {
+            issues.push("popup placement requires Herdr 0.7.4 or newer".into());
+        }
         DoctorReport {
             herdr_available,
+            herdr_version,
             config_dir: self.paths.config_dir.display().to_string(),
             config_path: self.paths.config_file.display().to_string(),
             state_dir: self.paths.state_dir.display().to_string(),
@@ -411,11 +528,6 @@ impl<H: Herdr> ScratchApp<H> {
             scratchpad_count: self.registry.scratchpads.len(),
             issues,
         }
-    }
-
-    fn session(&self) -> anyhow::Result<Output> {
-        run_session_process()?;
-        Ok(Output::None)
     }
 
     fn save(&self) -> anyhow::Result<()> {
@@ -497,6 +609,80 @@ impl<H: Herdr> ScratchApp<H> {
             context,
         })
     }
+}
+
+pub fn run_popup_attach(paths: Paths) -> anyhow::Result<()> {
+    let session = required_env("HERDR_SCRATCH_BACKING_SESSION")?;
+    let terminal_id = required_env("HERDR_SCRATCH_TERMINAL_ID")?;
+    let key = required_env("HERDR_SCRATCH_REGISTRY_KEY")?;
+    let store = RegistryStore::new(paths.registry_file.clone());
+    let _viewer_lease = store.viewer_lease(&key)?;
+
+    update_attach_status(&store, &key, LifecycleStatus::Visible, false)?;
+    let herdr = HerdrCli::discover();
+    let attach_result = herdr.attach_terminal(&session, &terminal_id);
+
+    let live = store
+        .load()
+        .ok()
+        .and_then(|registry| registry.scratchpads.get(&key).cloned())
+        .and_then(|record| record.handle)
+        .is_some_and(|handle| herdr.handle_get(&handle).is_ok());
+    update_attach_status(
+        &store,
+        &key,
+        if live {
+            LifecycleStatus::Available
+        } else {
+            LifecycleStatus::Closed
+        },
+        !live,
+    )?;
+    attach_result?;
+    Ok(())
+}
+
+fn update_attach_status(
+    store: &RegistryStore,
+    key: &str,
+    status: LifecycleStatus,
+    clear_handle: bool,
+) -> anyhow::Result<()> {
+    let _lock = store.lock()?;
+    let mut registry = store.load()?;
+    if let Some(record) = registry.scratchpads.get_mut(key) {
+        record.status = status;
+        if status == LifecycleStatus::Visible {
+            record.last_shown_at = now_rfc3339();
+        } else {
+            record.last_hidden_at = Some(now_rfc3339());
+        }
+        if clear_handle {
+            record.handle = None;
+        }
+        store.save(&registry)?;
+    }
+    Ok(())
+}
+
+fn required_env(key: &str) -> anyhow::Result<String> {
+    std::env::var(key).map_err(|_| anyhow::anyhow!("{key} is not set"))
+}
+
+fn herdr_supports_popup(version_output: &str) -> bool {
+    let version = version_output
+        .split_whitespace()
+        .find(|part| part.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
+        .unwrap_or_default();
+    let mut parts = version
+        .split('.')
+        .filter_map(|part| part.parse::<u64>().ok());
+    let current = (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    );
+    current >= (0, 7, 4)
 }
 
 #[derive(Debug, Clone)]
@@ -660,7 +846,7 @@ fn summary_for(record: &ScratchpadRecord) -> ScratchpadSummary {
     }
 }
 
-fn run_session_process() -> anyhow::Result<()> {
+pub fn run_runtime_session() -> anyhow::Result<()> {
     let command = std::env::var("HERDR_SCRATCH_COMMAND_JSON")
         .ok()
         .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
@@ -694,6 +880,135 @@ fn display_path(path: Option<PathBuf>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::PopupConfig;
+    use crate::herdr::{HerdrError, PaneInfo, TabInfo};
+    use std::{cell::RefCell, rc::Rc};
+
+    #[derive(Clone, Default)]
+    struct FakeHerdr {
+        calls: Rc<RefCell<Vec<String>>>,
+        fail_show: bool,
+    }
+
+    impl Herdr for FakeHerdr {
+        fn available(&self) -> bool {
+            true
+        }
+
+        fn version(&self) -> Option<String> {
+            Some("herdr 0.8.0".to_string())
+        }
+
+        fn current_pane(&self) -> Result<PaneInfo, HerdrError> {
+            Ok(PaneInfo {
+                pane_id: "w1:p1".to_string(),
+                terminal_id: "term-1".to_string(),
+                workspace_id: "w1".to_string(),
+                tab_id: "w1:t1".to_string(),
+                focused: true,
+                cwd: Some("/repo".to_string()),
+            })
+        }
+
+        fn tab_get(&self, tab_id: &str) -> Result<TabInfo, HerdrError> {
+            Ok(TabInfo {
+                tab_id: tab_id.to_string(),
+                workspace_id: "w1".to_string(),
+                focused: false,
+            })
+        }
+
+        fn handle_get(&self, handle: &RuntimeHandle) -> Result<PaneInfo, HerdrError> {
+            Ok(PaneInfo {
+                pane_id: handle.pane_id.clone().unwrap(),
+                terminal_id: handle.terminal_id.clone().unwrap(),
+                workspace_id: handle.workspace_id.clone().unwrap(),
+                tab_id: handle.focus_token().unwrap().to_string(),
+                focused: false,
+                cwd: Some("/repo".to_string()),
+            })
+        }
+
+        fn show_handle(
+            &self,
+            _handle: &RuntimeHandle,
+            registry_key: &str,
+            _popup: &PopupConfig,
+        ) -> Result<(), HerdrError> {
+            self.calls.borrow_mut().push(format!("show:{registry_key}"));
+            if self.fail_show {
+                Err(HerdrError::Unsupported("popup already open".to_string()))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn hide_handle(&self, _handle: &RuntimeHandle) -> Result<(), HerdrError> {
+            self.calls.borrow_mut().push("hide".to_string());
+            Ok(())
+        }
+
+        fn focus_previous(&self, _previous: &FocusSnapshot) -> Result<(), HerdrError> {
+            Ok(())
+        }
+
+        fn open_scratchpad(
+            &self,
+            request: OpenScratchpadRequest,
+        ) -> Result<RuntimeHandle, HerdrError> {
+            self.calls
+                .borrow_mut()
+                .push(format!("open:{}", request.placement.as_str()));
+            Ok(RuntimeHandle {
+                kind: "herdr_popup".to_string(),
+                pane_id: Some("w9:p1".to_string()),
+                terminal_id: Some("term-9".to_string()),
+                workspace_id: Some("w9".to_string()),
+                session: Some(request.backing_session),
+                opaque: BTreeMap::from([
+                    (
+                        "surface".to_string(),
+                        serde_json::Value::String("popup".to_string()),
+                    ),
+                    (
+                        "focus_token".to_string(),
+                        serde_json::Value::String("w9:t1".to_string()),
+                    ),
+                ]),
+            })
+        }
+
+        fn rename_handle(&self, _handle: &RuntimeHandle, _title: &str) -> Result<(), HerdrError> {
+            Ok(())
+        }
+
+        fn close_handle(&self, _handle: &RuntimeHandle) -> Result<(), HerdrError> {
+            self.calls.borrow_mut().push("close".to_string());
+            Ok(())
+        }
+
+        fn send_text(&self, _handle: &RuntimeHandle, text: &str) -> Result<(), HerdrError> {
+            self.calls.borrow_mut().push(format!("send:{text}"));
+            Ok(())
+        }
+
+        fn run_command(&self, _handle: &RuntimeHandle, command: &str) -> Result<(), HerdrError> {
+            self.calls.borrow_mut().push(format!("run:{command}"));
+            Ok(())
+        }
+    }
+
+    fn app_with_fake(fake: FakeHerdr) -> (tempfile::TempDir, ScratchApp<FakeHerdr>) {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config_dir: dir.path().join("config"),
+            state_dir: dir.path().join("state"),
+            config_file: dir.path().join("config/config.toml"),
+            registry_file: dir.path().join("state/registry.json"),
+        };
+        let app = ScratchApp::new(Config::default(), Registry::default(), paths, fake);
+        (dir, app)
+    }
 
     #[test]
     fn name_validation_rejects_empty_names() {
@@ -744,5 +1059,67 @@ mod tests {
             parse_cwd(Some("/tmp/project")),
             CwdMode::Path(path) if path == "/tmp/project"
         ));
+    }
+
+    #[test]
+    fn popup_version_check_accepts_minimum_and_newer() {
+        assert!(!herdr_supports_popup("herdr 0.7.3"));
+        assert!(herdr_supports_popup("herdr 0.7.4"));
+        assert!(herdr_supports_popup("herdr 0.8.0"));
+    }
+
+    #[test]
+    fn first_toggle_creates_backing_runtime_then_shows_popup() {
+        let fake = FakeHerdr::default();
+        let calls = fake.calls.clone();
+        let (_dir, mut app) = app_with_fake(fake);
+
+        app.toggle(None, None).unwrap();
+
+        assert_eq!(app.registry.scratchpads.len(), 1);
+        let key = app.registry.scratchpads.keys().next().unwrap();
+        let record = app.registry.scratchpads.values().next().unwrap();
+        assert_eq!(record.status, LifecycleStatus::Visible);
+        assert_eq!(
+            record.handle.as_ref().unwrap().session.as_deref(),
+            Some("herdr-scratch")
+        );
+        assert_eq!(
+            calls.borrow().clone(),
+            vec!["open:popup".to_string(), format!("show:{key}")]
+        );
+    }
+
+    #[test]
+    fn failed_popup_open_keeps_backing_runtime_available() {
+        let fake = FakeHerdr {
+            fail_show: true,
+            ..FakeHerdr::default()
+        };
+        let (_dir, mut app) = app_with_fake(fake);
+
+        assert!(app.toggle(None, None).is_err());
+
+        let record = app.registry.scratchpads.values().next().unwrap();
+        assert_eq!(record.status, LifecycleStatus::Available);
+        assert!(record.handle.is_some());
+    }
+
+    #[test]
+    fn toggle_hides_popup_when_viewer_lease_is_active() {
+        let fake = FakeHerdr::default();
+        let calls = fake.calls.clone();
+        let (_dir, mut app) = app_with_fake(fake);
+        app.toggle(None, None).unwrap();
+        let key = app.registry.scratchpads.keys().next().unwrap().clone();
+        let _lease = app.store.viewer_lease(&key).unwrap();
+
+        app.toggle(None, None).unwrap();
+
+        assert!(calls.borrow().iter().any(|call| call == "hide"));
+        assert_eq!(
+            app.registry.scratchpads.get(&key).unwrap().status,
+            LifecycleStatus::Available
+        );
     }
 }

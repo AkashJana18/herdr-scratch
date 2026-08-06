@@ -50,12 +50,19 @@ toggle_returns_to_previous = true
 reuse_existing = true
 restore_last_cwd = true
 close_confirmation = true
-placement = "split"
+placement = "popup"
 split_direction = "right"
 
 [ui]
 title_template = "scratch:{name}"
 status_notifications = "errors"
+
+[ui.popup]
+width = "80%"
+height = "80%"
+
+[runtime]
+backing_session = "herdr-scratch"
 
 [scope]
 default = "workspace"
@@ -72,9 +79,14 @@ scope = "workspace"
 
 Supported scopes are `global`, `workspace`, and `cwd`.
 
-Default scratchpads open as focused split panes in the current tab. The public
-interface remains scratchpad-oriented; placement values are configuration hints,
-not stable Herdr layout handles.
+Default scratchpads open as 80% × 80% session-modal popups. Their persistent
+terminals live in the configured private Herdr named session; the popup is a
+direct-attach viewer and does not change the active tab layout. Press `ctrl+b q`
+inside the popup to detach it without stopping the terminal. `split` and `tab`
+remain supported placement values for existing configurations.
+
+Popup width and height accept terminal cell counts or percentage strings from
+`"1%"` through `"100%"`. Herdr clamps dimensions below its popup minimum.
 
 ## Registry
 
@@ -87,9 +99,10 @@ $HERDR_PLUGIN_STATE_DIR/registry.json
 When `HERDR_PLUGIN_STATE_DIR` is not set, the CLI uses the user's normal
 platform data directory.
 
-The registry is versioned and stores soft runtime handles. Every command
-validates handles before using them. Stale records are repaired by `open` and
-`toggle`.
+The version-2 registry stores soft pane and terminal handles plus the backing
+session name. Version-1 split/tab records migrate without terminating or moving
+their live panes. Every command validates handles before using them; stale
+records are repaired by `open` and `toggle`.
 
 ## Plugin Manifest
 
@@ -111,9 +124,9 @@ herdr.scratch.list
 herdr.scratch.doctor
 ```
 
-The manifest also declares an internal `scratch` pane entrypoint used to run the
-scratchpad session process. Users should invoke public actions or CLI commands,
-not the internal entrypoint.
+The manifest declares internal `scratch` and `popup` pane entrypoints for the
+persistent runtime and direct-attach viewer. Users should invoke public actions
+or CLI commands, not either internal entrypoint.
 
 ## Recommended Keybindings
 

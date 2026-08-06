@@ -3,7 +3,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+
+const REGISTRY_VERSION: u32 = 2;
 
 #[derive(Debug, Clone)]
 pub struct RegistryStore {
@@ -22,6 +25,90 @@ impl RegistryStore {
     pub fn save(&self, registry: &Registry) -> anyhow::Result<()> {
         registry.save(&self.path)
     }
+
+    pub fn lock(&self) -> anyhow::Result<RegistryLock> {
+        let path = self.path.with_extension("lock");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)?;
+        file.lock_exclusive()?;
+        Ok(RegistryLock { file })
+    }
+
+    pub fn viewer_lease(&self, key: &str) -> anyhow::Result<ViewerLease> {
+        let path = self.viewer_lease_path(key);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)?;
+        file.lock_exclusive()?;
+        Ok(ViewerLease { file })
+    }
+
+    pub fn viewer_is_active(&self, key: &str) -> bool {
+        let path = self.viewer_lease_path(key);
+        let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)
+        else {
+            return false;
+        };
+        match file.try_lock_exclusive() {
+            Ok(()) => {
+                let _ = file.unlock();
+                false
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => true,
+            Err(_) => false,
+        }
+    }
+
+    fn viewer_lease_path(&self, key: &str) -> PathBuf {
+        let encoded = key
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        self.path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("viewers")
+            .join(format!("{encoded}.lock"))
+    }
+}
+
+pub struct RegistryLock {
+    file: std::fs::File,
+}
+
+impl Drop for RegistryLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
+pub struct ViewerLease {
+    file: std::fs::File,
+}
+
+impl Drop for ViewerLease {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,7 +121,7 @@ pub struct Registry {
 impl Default for Registry {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: REGISTRY_VERSION,
             scratchpads: BTreeMap::new(),
         }
     }
@@ -46,7 +133,10 @@ impl Registry {
             return Ok(Self::default());
         }
         let content = std::fs::read_to_string(path)?;
-        let registry = serde_json::from_str(&content)?;
+        let mut registry: Self = serde_json::from_str(&content)?;
+        if registry.version <= 1 {
+            registry.version = REGISTRY_VERSION;
+        }
         Ok(registry)
     }
 
@@ -114,12 +204,26 @@ pub struct RuntimeHandle {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
     #[serde(default)]
     pub opaque: BTreeMap<String, serde_json::Value>,
 }
 
 impl RuntimeHandle {
+    pub fn is_popup(&self) -> bool {
+        self.kind == "herdr_popup" || self.surface() == Some("popup")
+    }
+
+    pub fn surface(&self) -> Option<&str> {
+        self.opaque
+            .get("surface")
+            .and_then(serde_json::Value::as_str)
+    }
+
     pub fn focus_token(&self) -> Option<&str> {
         self.opaque
             .get("focus_token")
@@ -206,5 +310,39 @@ mod tests {
         registry.save(&path).unwrap();
         let loaded = Registry::load(&path).unwrap();
         assert_eq!(loaded.scratchpads.len(), 1);
+        assert_eq!(loaded.version, REGISTRY_VERSION);
+    }
+
+    #[test]
+    fn registry_load_migrates_version_one_without_rewriting_handles() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"scratchpads":{"workspace:w1:scratch":{"name":"scratch","scope":{"kind":"workspace","key":"w1"},"profile":"default","status":"available","handle":{"kind":"herdr","pane_id":"w1:p2","workspace_id":"w1","opaque":{"surface":"split"}},"created_at":"now","last_shown_at":"now"}}}"#,
+        )
+        .unwrap();
+        let loaded = Registry::load(&path).unwrap();
+        let handle = loaded
+            .scratchpads
+            .values()
+            .next()
+            .unwrap()
+            .handle
+            .as_ref()
+            .unwrap();
+        assert_eq!(loaded.version, REGISTRY_VERSION);
+        assert_eq!(handle.kind, "herdr");
+        assert_eq!(handle.pane_id.as_deref(), Some("w1:p2"));
+    }
+
+    #[test]
+    fn viewer_lease_reports_active_until_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RegistryStore::new(dir.path().join("registry.json"));
+        let lease = store.viewer_lease("workspace:w1:scratch").unwrap();
+        assert!(store.viewer_is_active("workspace:w1:scratch"));
+        drop(lease);
+        assert!(!store.viewer_is_active("workspace:w1:scratch"));
     }
 }

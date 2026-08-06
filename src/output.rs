@@ -15,7 +15,6 @@ pub enum Output {
         report: DoctorReport,
         json: bool,
     },
-    None,
 }
 
 pub fn print(output: Output) -> anyhow::Result<()> {
@@ -49,6 +48,10 @@ pub fn print(output: Output) -> anyhow::Result<()> {
                 return print_json(&report);
             }
             println!("herdr: {}", status_word(report.herdr_available));
+            println!(
+                "herdr version: {}",
+                report.herdr_version.as_deref().unwrap_or("unknown")
+            );
             println!("config dir: {}", report.config_dir);
             println!("config: {}", report.config_path);
             println!("state dir: {}", report.state_dir);
@@ -59,7 +62,6 @@ pub fn print(output: Output) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Output::None => Ok(()),
     }
 }
 
