@@ -47,19 +47,7 @@ pub fn print(output: Output) -> anyhow::Result<()> {
             if json {
                 return print_json(&report);
             }
-            println!("herdr: {}", status_word(report.herdr_available));
-            println!(
-                "herdr version: {}",
-                report.herdr_version.as_deref().unwrap_or("unknown")
-            );
-            println!("config dir: {}", report.config_dir);
-            println!("config: {}", report.config_path);
-            println!("state dir: {}", report.state_dir);
-            println!("state: {}", report.state_path);
-            println!("scratchpads: {}", report.scratchpad_count);
-            for issue in report.issues {
-                println!("issue: {issue}");
-            }
+            println!("{}", format_doctor(&report));
             Ok(())
         }
     }
@@ -73,4 +61,45 @@ fn print_json(value: &impl Serialize) -> anyhow::Result<()> {
 
 fn status_word(ok: bool) -> &'static str {
     if ok { "ok" } else { "unavailable" }
+}
+
+fn format_doctor(report: &DoctorReport) -> String {
+    let mut lines = vec![
+        format!("herdr: {}", status_word(report.herdr_available)),
+        format!(
+            "herdr version: {}",
+            report.herdr_version.as_deref().unwrap_or("unknown")
+        ),
+        format!("config dir: {}", report.config_dir),
+        format!("config: {}", report.config_path),
+        format!("state dir: {}", report.state_dir),
+        format!("state: {}", report.state_path),
+        format!("scratchpads: {}", report.scratchpad_count),
+    ];
+    lines.extend(report.issues.iter().map(|issue| format!("issue: {issue}")));
+    lines.push("next: herdr plugin action invoke guide --plugin herdr.scratch".to_string());
+    lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn human_doctor_output_points_to_the_guide() {
+        let report = DoctorReport {
+            herdr_available: true,
+            herdr_version: Some("herdr 0.8.0".to_string()),
+            config_dir: "/config".to_string(),
+            config_path: "/config/config.toml".to_string(),
+            state_dir: "/state".to_string(),
+            state_path: "/state/registry.json".to_string(),
+            scratchpad_count: 0,
+            issues: Vec::new(),
+        };
+
+        let output = format_doctor(&report);
+        assert!(output.contains("herdr: ok"));
+        assert!(output.ends_with("next: herdr plugin action invoke guide --plugin herdr.scratch"));
+    }
 }

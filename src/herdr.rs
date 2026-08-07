@@ -23,11 +23,13 @@ use std::{
 pub const PLUGIN_ID: &str = "herdr.scratch";
 const RUNTIME_ENTRYPOINT: &str = "scratch";
 const POPUP_ENTRYPOINT: &str = "popup";
+const GUIDE_ENTRYPOINT: &str = "guide";
 
 pub trait Herdr {
     fn available(&self) -> bool;
     fn version(&self) -> Option<String>;
     fn current_pane(&self) -> Result<PaneInfo, HerdrError>;
+    fn open_guide(&self) -> Result<(), HerdrError>;
     fn tab_get(&self, tab_id: &str) -> Result<TabInfo, HerdrError>;
     fn handle_get(&self, handle: &RuntimeHandle) -> Result<PaneInfo, HerdrError>;
     fn show_handle(
@@ -299,6 +301,24 @@ impl Herdr for HerdrCli {
     fn current_pane(&self) -> Result<PaneInfo, HerdrError> {
         let value = self.run(&["pane".into(), "current".into()])?;
         parse_pane_result(value)
+    }
+
+    fn open_guide(&self) -> Result<(), HerdrError> {
+        self.run_ok(&[
+            "plugin".into(),
+            "pane".into(),
+            "open".into(),
+            "--plugin".into(),
+            PLUGIN_ID.into(),
+            "--entrypoint".into(),
+            GUIDE_ENTRYPOINT.into(),
+            "--placement".into(),
+            "popup".into(),
+            "--width".into(),
+            "70%".into(),
+            "--height".into(),
+            "60%".into(),
+        ])
     }
 
     fn tab_get(&self, tab_id: &str) -> Result<TabInfo, HerdrError> {

@@ -59,6 +59,7 @@ impl<H: Herdr> ScratchApp<H> {
 
     pub fn handle(&mut self, command: cli::Command) -> anyhow::Result<Output> {
         match command {
+            cli::Command::Guide => self.guide(),
             cli::Command::Toggle(args) => {
                 self.toggle(args.name.as_deref(), command_override(args.command))
             }
@@ -86,7 +87,19 @@ impl<H: Herdr> ScratchApp<H> {
             }) => Ok(Output::Text(self.paths.registry_file.display().to_string())),
             cli::Command::Session => anyhow::bail!("session must be handled before app startup"),
             cli::Command::Attach => anyhow::bail!("attach must be handled before app startup"),
+            cli::Command::GuidePane => {
+                anyhow::bail!("guide-pane must be handled before app startup")
+            }
         }
+    }
+
+    fn guide(&self) -> anyhow::Result<Output> {
+        self.herdr.open_guide().map_err(|err| {
+            anyhow::anyhow!(
+                "failed to open the Scratch guide popup: {err}. If another popup is open, detach it with ctrl+b q and try again"
+            )
+        })?;
+        Ok(Output::Text("opened Scratch quick start".to_string()))
     }
 
     fn toggle(
@@ -642,6 +655,44 @@ pub fn run_popup_attach(paths: Paths) -> anyhow::Result<()> {
     Ok(())
 }
 
+const GUIDE_TEXT: &str = r#"
+Scratch is ready
+================
+
+1. Open or hide your persistent scratchpad:
+   herdr plugin action invoke toggle --plugin herdr.scratch
+
+2. While the popup has focus, press ctrl+b q to hide it.
+   The terminal keeps running in the background.
+
+3. Run the toggle action again to bring it back.
+
+Recommended keybinding (~/.config/herdr/config.toml):
+
+   [[keys.command]]
+   key = "prefix+p"
+   type = "plugin_action"
+   command = "herdr.scratch.toggle"
+   description = "toggle scratchpad"
+
+Then run: herdr server reload-config
+
+Diagnostics: herdr plugin action invoke doctor --plugin herdr.scratch
+Docs: https://github.com/AkashJana18/herdr-scratch
+
+Press Enter to close this guide. You can also press ctrl+b q.
+"#;
+
+pub fn run_guide_pane() -> anyhow::Result<()> {
+    use std::io::{self, Write};
+
+    print!("{GUIDE_TEXT}");
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(())
+}
+
 fn update_attach_status(
     store: &RegistryStore,
     key: &str,
@@ -910,6 +961,11 @@ mod tests {
             })
         }
 
+        fn open_guide(&self) -> Result<(), HerdrError> {
+            self.calls.borrow_mut().push("open:guide".to_string());
+            Ok(())
+        }
+
         fn tab_get(&self, tab_id: &str) -> Result<TabInfo, HerdrError> {
             Ok(TabInfo {
                 tab_id: tab_id.to_string(),
@@ -1066,6 +1122,27 @@ mod tests {
         assert!(!herdr_supports_popup("herdr 0.7.3"));
         assert!(herdr_supports_popup("herdr 0.7.4"));
         assert!(herdr_supports_popup("herdr 0.8.0"));
+    }
+
+    #[test]
+    fn guide_opens_visible_popup() {
+        let fake = FakeHerdr::default();
+        let calls = fake.calls.clone();
+        let (_dir, mut app) = app_with_fake(fake);
+
+        let output = app.handle(cli::Command::Guide).unwrap();
+
+        assert!(matches!(output, Output::Text(text) if text == "opened Scratch quick start"));
+        assert_eq!(calls.borrow().as_slice(), ["open:guide"]);
+    }
+
+    #[test]
+    fn guide_covers_the_first_run_workflow() {
+        assert!(GUIDE_TEXT.contains("action invoke toggle"));
+        assert!(GUIDE_TEXT.contains("ctrl+b q"));
+        assert!(GUIDE_TEXT.contains("herdr.scratch.toggle"));
+        assert!(GUIDE_TEXT.contains("server reload-config"));
+        assert!(GUIDE_TEXT.contains("action invoke doctor"));
     }
 
     #[test]
