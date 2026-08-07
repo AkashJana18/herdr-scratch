@@ -11,6 +11,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Open the interactive Scratch quick-start guide.
+    Guide,
     /// Show the scratchpad, or return to the previous context when it is active.
     Toggle(OpenArgs),
     /// Create or show a scratchpad.
@@ -43,6 +45,9 @@ pub enum Command {
     /// Internal popup attachment entrypoint.
     #[command(hide = true)]
     Attach,
+    /// Internal quick-start popup entrypoint.
+    #[command(hide = true)]
+    GuidePane,
 }
 
 #[derive(Debug, Args)]
@@ -192,5 +197,11 @@ mod tests {
         assert_eq!(args.name, "lazygit");
         assert_eq!(args.scope.as_deref(), Some("cwd"));
         assert_eq!(args.command, vec!["lazygit"]);
+    }
+
+    #[test]
+    fn parses_guide() {
+        let cli = Cli::parse_from(["herdr-scratch", "guide"]);
+        assert!(matches!(cli.command, Command::Guide));
     }
 }

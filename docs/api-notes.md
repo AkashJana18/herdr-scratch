@@ -34,8 +34,9 @@ There is no Herdr-managed storage API in v1. `HERDR_PLUGIN_CONFIG_DIR` and
 
 `herdr-scratch` declares:
 
-- public actions: `toggle`, `open`, `list`, `doctor`
+- public actions: `guide`, `toggle`, `open`, `list`, `doctor`
 - named convenience actions: `lazygit`, `notes`
+- one quick-start popup entrypoint: `guide`
 - one internal pane entrypoint: `scratch`
 - one internal popup viewer entrypoint: `popup`
 

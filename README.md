@@ -38,8 +38,38 @@ Install from GitHub:
 herdr plugin install AkashJana18/herdr-scratch
 ```
 
+## Quick Start
+
+Open the visible getting-started guide:
+
+```bash
+herdr plugin action invoke guide --plugin herdr.scratch
+```
+
+Then toggle the default persistent scratchpad:
+
+```bash
+herdr plugin action invoke toggle --plugin herdr.scratch
+```
+
+While the popup has focus, press `ctrl+b q` to hide it without stopping its
+terminal. Invoke the toggle action again to bring it back.
+
+For one-key access, add this to `~/.config/herdr/config.toml`:
+
+```toml
+[[keys.command]]
+key = "prefix+p"
+type = "plugin_action"
+command = "herdr.scratch.toggle"
+description = "toggle scratchpad"
+```
+
+Apply the keybinding with `herdr server reload-config`, then use
+`ctrl+b p` to toggle Scratch.
+
 During installation Herdr runs `scripts/install-binary.sh`. The installer
-detects the current platform, downloads the matching `v1.0.0` release asset,
+detects the current platform, downloads the matching `v1.0.1` release asset,
 verifies the SHA256 checksum from `checksums.txt`, and installs the executable
 at:
 
@@ -147,6 +177,7 @@ interface.
 ## Commands
 
 ```text
+herdr-scratch guide
 herdr-scratch toggle [name] [-- <command>...]
 herdr-scratch open [name] [-- <command>...]
 herdr-scratch focus [name]
@@ -166,6 +197,12 @@ herdr-scratch state path
 ```
 
 ## Usage Examples
+
+Open the quick-start guide:
+
+```bash
+herdr-scratch guide
+```
 
 Toggle the default scratchpad:
 
@@ -286,8 +323,8 @@ is a development wrapper that delegates to `target/release/herdr-scratch`.
 4. Create and push a matching tag:
 
    ```bash
-   git tag v1.0.0
-   git push origin v1.0.0
+   git tag v1.0.1
+   git push origin v1.0.1
    ```
 
 5. GitHub Actions builds release binaries, generates `checksums.txt`, and
@@ -295,7 +332,7 @@ is a development wrapper that delegates to `target/release/herdr-scratch`.
 6. Verify a clean install:
 
    ```bash
-   herdr plugin install AkashJana18/herdr-scratch --ref v1.0.0
+   herdr plugin install AkashJana18/herdr-scratch --ref v1.0.1
    ```
 
 Design decisions and assumptions:

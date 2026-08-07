@@ -124,5 +124,5 @@ jobs:
               --title "herdr-scratch ${version}" \
               --latest \
               --generate-notes \
-              --notes "First stable release of the Floax-style persistent popup scratchpad experience for Herdr."
+              --notes "Prebuilt binaries and checksums are attached for every supported platform."
           fi
