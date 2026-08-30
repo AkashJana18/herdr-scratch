@@ -14,6 +14,8 @@ prebuilt binaries from GitHub Releases, so users do not need Rust or Cargo.
 
 - Named scratchpads with `toggle`, `open`, `focus`, `hide`, and `close`.
 - Native 80% × 80% floating popups that detach without stopping their terminal.
+- Popup sizing: step `resize` up/down, `fullscreen` toggle, and `reset` to the
+  configured size, with size persisted per scratchpad.
 - One-shot command scratchpads, such as `open lazygit -- lazygit`.
 - Scoped scratchpads: `global`, `workspace`, or `cwd`.
 - Reuse of existing live scratchpads to avoid duplicates.
@@ -146,6 +148,8 @@ restore_last_cwd = true
 close_confirmation = true
 placement = "popup"
 split_direction = "right"
+resize_step = "5%"
+fullscreen_size = "100%"
 
 [ui]
 title_template = "scratch:{name}"
@@ -183,6 +187,9 @@ herdr-scratch open [name] [-- <command>...]
 herdr-scratch focus [name]
 herdr-scratch hide [name]
 herdr-scratch close [name]
+herdr-scratch resize <up|down> [name]
+herdr-scratch fullscreen [name]
+herdr-scratch reset [name]
 herdr-scratch list [--json]
 herdr-scratch status [name] [--json]
 herdr-scratch rename <old> <new>
@@ -239,6 +246,19 @@ Send a command to an existing scratchpad:
 herdr-scratch run notes "git status"
 ```
 
+Resize a popup scratchpad (step from `behavior.resize_step`), toggle it
+fullscreen, or reset it to its configured size:
+
+```bash
+herdr-scratch resize up
+herdr-scratch fullscreen
+herdr-scratch resize down notes
+herdr-scratch reset
+```
+
+Sizing applies to popup scratchpads only; a size change persists for that
+scratchpad until `reset` or a `behavior` config change.
+
 Inspect state:
 
 ```bash
@@ -273,6 +293,30 @@ key = "prefix+n"
 type = "plugin_action"
 command = "herdr.scratch.notes"
 description = "toggle notes scratchpad"
+
+[[keys.command]]
+key = "prefix+-"
+type = "plugin_action"
+command = "herdr.scratch.size-down"
+description = "shrink popup scratchpad"
+
+[[keys.command]]
+key = "prefix+="
+type = "plugin_action"
+command = "herdr.scratch.size-up"
+description = "grow popup scratchpad"
+
+[[keys.command]]
+key = "prefix+f"
+type = "plugin_action"
+command = "herdr.scratch.fullscreen"
+description = "toggle popup fullscreen"
+
+[[keys.command]]
+key = "prefix+r"
+type = "plugin_action"
+command = "herdr.scratch.reset"
+description = "reset popup scratchpad size"
 ```
 
 ## Screenshots

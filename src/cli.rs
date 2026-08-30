@@ -33,6 +33,12 @@ pub enum Command {
     Send(SendArgs),
     /// Send a command to a scratchpad and press Enter.
     Run(RunArgs),
+    /// Resize a popup scratchpad.
+    Resize(ResizeArgs),
+    /// Toggle a popup scratchpad to fullscreen (or back to its previous size).
+    Fullscreen(NameArg),
+    /// Reset a popup scratchpad to its configured size.
+    Reset(NameArg),
     /// Validate Herdr Scratch configuration and runtime connectivity.
     Doctor(JsonArg),
     /// Print config paths.
@@ -91,6 +97,21 @@ pub struct SendArgs {
 pub struct RunArgs {
     pub name: String,
     pub command: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ResizeDirection {
+    /// Increase the popup size.
+    Up,
+    /// Decrease the popup size.
+    Down,
+}
+
+#[derive(Debug, Args)]
+pub struct ResizeArgs {
+    #[arg(value_enum)]
+    pub direction: ResizeDirection,
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -203,5 +224,35 @@ mod tests {
     fn parses_guide() {
         let cli = Cli::parse_from(["herdr-scratch", "guide"]);
         assert!(matches!(cli.command, Command::Guide));
+    }
+
+    #[test]
+    fn parses_resize_direction_and_fullscreen() {
+        let up = Cli::parse_from(["herdr-scratch", "resize", "up"]);
+        assert!(matches!(
+            up.command,
+            Command::Resize(ResizeArgs {
+                direction: ResizeDirection::Up,
+                ..
+            })
+        ));
+        let named_down = Cli::parse_from(["herdr-scratch", "resize", "down", "notes"]);
+        if let Command::Resize(ResizeArgs { direction, name }) = named_down.command {
+            assert_eq!(direction, ResizeDirection::Down);
+            assert_eq!(name.as_deref(), Some("notes"));
+        } else {
+            panic!("expected resize command");
+        }
+        let fullscreen = Cli::parse_from(["herdr-scratch", "fullscreen"]);
+        assert!(matches!(
+            fullscreen.command,
+            Command::Fullscreen(NameArg { name: None })
+        ));
+        let reset = Cli::parse_from(["herdr-scratch", "reset", "scratch"]);
+        if let Command::Reset(NameArg { name }) = reset.command {
+            assert_eq!(name.as_deref(), Some("scratch"));
+        } else {
+            panic!("expected reset command");
+        }
     }
 }

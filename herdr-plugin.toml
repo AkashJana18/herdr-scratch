@@ -57,6 +57,34 @@ description = "Open or focus a notes scratchpad."
 contexts = ["workspace", "tab", "pane"]
 command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" toggle notes"]
 
+[[actions]]
+id = "size-up"
+title = "Increase popup size"
+description = "Grow the popup scratchpad by the configured resize step."
+contexts = ["workspace", "tab", "pane"]
+command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" resize up"]
+
+[[actions]]
+id = "size-down"
+title = "Decrease popup size"
+description = "Shrink the popup scratchpad by the configured resize step."
+contexts = ["workspace", "tab", "pane"]
+command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" resize down"]
+
+[[actions]]
+id = "fullscreen"
+title = "Toggle popup fullscreen"
+description = "Expand the popup scratchpad to fullscreen, or restore its previous size."
+contexts = ["workspace", "tab", "pane"]
+command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" fullscreen"]
+
+[[actions]]
+id = "reset"
+title = "Reset popup size"
+description = "Return the popup scratchpad to its configured width and height."
+contexts = ["workspace", "tab", "pane"]
+command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" reset"]
+
 [[panes]]
 id = "guide"
 title = "Scratch quick start"

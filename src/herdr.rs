@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    config::{PopupConfig, ScratchpadPlacement, SplitDirection},
+    config::{PopupConfig, PopupSize, ScratchpadPlacement, SplitDirection},
     registry::{FocusSnapshot, RuntimeHandle},
 };
 
@@ -37,6 +37,7 @@ pub trait Herdr {
         handle: &RuntimeHandle,
         registry_key: &str,
         popup: &PopupConfig,
+        size: Option<&PopupSize>,
     ) -> Result<(), HerdrError>;
     fn hide_handle(&self, handle: &RuntimeHandle) -> Result<(), HerdrError>;
     fn focus_previous(&self, previous: &FocusSnapshot) -> Result<(), HerdrError>;
@@ -346,6 +347,7 @@ impl Herdr for HerdrCli {
         handle: &RuntimeHandle,
         registry_key: &str,
         popup: &PopupConfig,
+        size: Option<&PopupSize>,
     ) -> Result<(), HerdrError> {
         if handle.is_popup() {
             let session = handle
@@ -356,6 +358,10 @@ impl Herdr for HerdrCli {
                 .terminal_id
                 .as_deref()
                 .ok_or(HerdrError::MissingHandle("terminal_id"))?;
+            let (width, height) = match size {
+                Some(size) => size.to_arg_pairs(),
+                None => (popup.width.as_arg(), popup.height.as_arg()),
+            };
             let args = vec![
                 "plugin".to_string(),
                 "pane".to_string(),
@@ -367,9 +373,9 @@ impl Herdr for HerdrCli {
                 "--placement".to_string(),
                 "popup".to_string(),
                 "--width".to_string(),
-                popup.width.as_arg(),
+                width,
                 "--height".to_string(),
-                popup.height.as_arg(),
+                height,
                 "--env".to_string(),
                 format!("HERDR_SCRATCH_BACKING_SESSION={session}"),
                 "--env".to_string(),
