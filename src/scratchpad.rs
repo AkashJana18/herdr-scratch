@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     path::PathBuf,
     process::Command,
 };
@@ -25,6 +25,11 @@ pub struct ScratchpadSummary {
     pub name: String,
     pub scope: String,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
 }
 
@@ -32,11 +37,14 @@ pub struct ScratchpadSummary {
 pub struct DoctorReport {
     pub herdr_available: bool,
     pub herdr_version: Option<String>,
+    pub server_ok: bool,
     pub config_dir: String,
     pub config_path: String,
     pub state_dir: String,
     pub state_path: String,
     pub scratchpad_count: usize,
+    #[serde(default)]
+    pub keybinding_missing: usize,
     pub issues: Vec<String>,
 }
 
@@ -83,6 +91,7 @@ impl<H: Herdr> ScratchApp<H> {
             cli::Command::Resize(args) => self.resize(args.direction, args.name.as_deref()),
             cli::Command::Fullscreen(args) => self.fullscreen(args.name.as_deref()),
             cli::Command::Reset(args) => self.reset(args.name.as_deref()),
+            cli::Command::Setup => self.setup(),
             cli::Command::Doctor(args) => Ok(Output::Doctor {
                 report: self.doctor(),
                 json: args.json,
@@ -152,8 +161,8 @@ impl<H: Herdr> ScratchApp<H> {
         };
         self.ensure_live(handle)?;
         if !self.store.viewer_is_active(&target.key) {
-            self.herdr
-                .show_handle(handle, &target.key, &self.config.ui.popup, None)?;
+            self.show_or_friendly(handle, &target.key, None)?;
+            self.ensure_path_sync(&target, host_cwd(current.as_ref(), &target).as_deref());
         }
         self.update_visible(&target.key, current.map(FocusSnapshot::from));
         self.save()?;
@@ -202,6 +211,8 @@ impl<H: Herdr> ScratchApp<H> {
                 name: target.name,
                 scope: target.scope.to_string(),
                 status: LifecycleStatus::Closed.to_string(),
+                surface: None,
+                size: None,
                 cwd: None,
             };
             return if json {
@@ -379,8 +390,7 @@ impl<H: Herdr> ScratchApp<H> {
         if self.store.viewer_is_active(&target.key) {
             self.herdr.hide_handle(handle)?;
         }
-        self.herdr
-            .show_handle(handle, &target.key, &self.config.ui.popup, Some(&size))?;
+        self.show_or_friendly(handle, &target.key, Some(&size))?;
 
         let mut handle = handle.clone();
         handle
@@ -403,6 +413,7 @@ impl<H: Herdr> ScratchApp<H> {
         command: Option<Vec<String>>,
     ) -> anyhow::Result<Output> {
         let existing = self.registry.scratchpads.get(&target.key).cloned();
+        let host_cwd = host_cwd(previous.as_ref(), &target);
         if self.config.behavior.reuse_existing
             && let Some(record) = existing.as_ref()
             && let Some(handle) = record.handle.as_ref()
@@ -417,8 +428,8 @@ impl<H: Herdr> ScratchApp<H> {
                     target.name
                 )));
             }
-            self.herdr
-                .show_handle(handle, &target.key, &self.config.ui.popup, None)?;
+            self.show_or_friendly(handle, &target.key, None)?;
+            self.ensure_path_sync(&target, host_cwd.as_deref());
             self.update_visible(&target.key, previous.map(FocusSnapshot::from));
             self.save()?;
             return Ok(Output::Text(format!("opened scratchpad `{}`", target.name)));
@@ -439,16 +450,14 @@ impl<H: Herdr> ScratchApp<H> {
         let key = target.key.clone();
         self.registry.insert(key.clone(), record);
         self.save()?;
-        if let Err(err) = self
-            .herdr
-            .show_handle(&handle, &key, &self.config.ui.popup, None)
-        {
+        if let Err(err) = self.show_or_friendly(&handle, &key, None) {
             if let Some(record) = self.registry.scratchpads.get_mut(&key) {
                 record.status = LifecycleStatus::Available;
             }
             self.save()?;
-            return Err(err.into());
+            return Err(err);
         }
+        self.ensure_path_sync(&target, host_cwd.as_deref());
         self.update_visible(&key, previous_focus);
         self.save()?;
         Ok(Output::Text(format!("opened scratchpad `{name}`")))
@@ -490,11 +499,13 @@ impl<H: Herdr> ScratchApp<H> {
         })?;
         self.rename_handle_best_effort(&handle, &self.title_for(&target.name));
         let now = now_rfc3339();
+        let stored_command = (!launch_command.is_empty()).then_some(launch_command);
         Ok(ScratchpadRecord {
             name: target.name.clone(),
             scope: target.scope.clone(),
             profile: scratch_config.profile,
             status: LifecycleStatus::Visible,
+            launch_command: stored_command,
             handle: Some(handle),
             cwd,
             created_at: previous_record
@@ -555,6 +566,68 @@ impl<H: Herdr> ScratchApp<H> {
             self.herdr.tab_get(focus_token)?;
         }
         Ok(())
+    }
+
+    /// Mirrors the floax `change_path` behavior: after a bare-shell popup is
+    /// shown, cd its backing terminal to the directory of the pane it was
+    /// opened from. This is best-effort; a failed sync never breaks the open.
+    fn ensure_path_sync(&mut self, target: &Target, host_cwd: Option<&str>) {
+        if !self.config.behavior.change_path {
+            return;
+        }
+        let Some(host_cwd) = host_cwd.filter(|cwd| !cwd.is_empty()) else {
+            return;
+        };
+        let Some(record) = self.registry.scratchpads.get(&target.key).cloned() else {
+            return;
+        };
+        if !bare_shell(&self.config, &record) {
+            return;
+        }
+        let Some(handle) = record.handle else {
+            return;
+        };
+        if !handle.is_popup() {
+            return;
+        }
+        let current = self
+            .herdr
+            .handle_get(&handle)
+            .ok()
+            .and_then(|info| info.cwd);
+        if current.as_deref() == Some(host_cwd) {
+            return;
+        }
+        if self
+            .herdr
+            .run_command(&handle, &format!("cd {}", shell_quote(host_cwd)))
+            .is_err()
+        {
+            return;
+        }
+        if let Some(record) = self.registry.scratchpads.get_mut(&target.key) {
+            record.cwd = Some(host_cwd.to_string());
+        }
+    }
+
+    /// Show a scratchpad, mapping a Herdr "popup already open" rejection to a
+    /// friendly hint before propagating any other error.
+    fn show_or_friendly(
+        &self,
+        handle: &RuntimeHandle,
+        key: &str,
+        size: Option<&PopupSize>,
+    ) -> anyhow::Result<()> {
+        match self
+            .herdr
+            .show_handle(handle, key, &self.config.ui.popup, size)
+        {
+            Ok(()) => Ok(()),
+            Err(err) if err.is_popup_open() => Err(anyhow::anyhow!(
+                "another popup is already open; detach it with ctrl+b q and try again"
+            )),
+            Err(err) => Err(err.into()),
+        }
     }
 
     fn update_visible(&mut self, key: &str, previous: Option<FocusSnapshot>) {
@@ -628,6 +701,13 @@ impl<H: Herdr> ScratchApp<H> {
 
     fn summary_for_key(&self, key: &str, record: &ScratchpadRecord) -> ScratchpadSummary {
         let mut summary = summary_for(record);
+        if let Some(handle) = record.handle.as_ref() {
+            summary.surface = handle.surface().map(str::to_string);
+            if handle.is_popup() {
+                let size = stored_popup_size(handle).unwrap_or_else(|| self.config.ui.popup.size());
+                summary.size = Some(format!("{}x{}", size.width.as_arg(), size.height.as_arg()));
+            }
+        }
         if record.handle.as_ref().is_some_and(RuntimeHandle::is_popup) {
             summary.status = if matches!(
                 record.status,
@@ -649,9 +729,13 @@ impl<H: Herdr> ScratchApp<H> {
         let mut issues = Vec::new();
         let herdr_available = self.herdr.available();
         let herdr_version = self.herdr.version();
+        let server_ok = herdr_available && self.herdr.server_reachable();
         if !herdr_available {
             issues
                 .push("Herdr CLI is not available; set HERDR_BIN_PATH or add herdr to PATH".into());
+        }
+        if !server_ok {
+            issues.push("Herdr server is not reachable; start it with `herdr server`".into());
         }
         if self.config.version != 1 {
             issues.push(format!(
@@ -666,20 +750,55 @@ impl<H: Herdr> ScratchApp<H> {
         {
             issues.push("popup placement requires Herdr 0.7.4 or newer".into());
         }
+        let keybinding_missing = match pending_keybindings(&herdr_config_path()) {
+            Ok(pending) => {
+                if pending.is_empty() {
+                    0
+                } else {
+                    issues.push(format!(
+                        "{} recommended keybinding(s) are not configured; run `herdr-scratch setup`",
+                        pending.len()
+                    ));
+                    pending.len()
+                }
+            }
+            Err(err) => {
+                issues.push(format!(
+                    "could not read the Herdr config for setup: {err:#}"
+                ));
+                0
+            }
+        };
         DoctorReport {
             herdr_available,
             herdr_version,
+            server_ok,
             config_dir: self.paths.config_dir.display().to_string(),
             config_path: self.paths.config_file.display().to_string(),
             state_dir: self.paths.state_dir.display().to_string(),
             state_path: self.paths.registry_file.display().to_string(),
             scratchpad_count: self.registry.scratchpads.len(),
+            keybinding_missing,
             issues,
         }
     }
 
     fn save(&self) -> anyhow::Result<()> {
         self.store.save(&self.registry)
+    }
+
+    fn setup(&mut self) -> anyhow::Result<Output> {
+        let path = herdr_config_path();
+        let (added, skipped) = write_keybindings(&path)?;
+        if added == 0 {
+            return Ok(Output::Text(
+                "keybindings are already configured for herdr-scratch".to_string(),
+            ));
+        }
+        Ok(Output::Text(format!(
+            "wrote {added} recommended keybinding(s) to {}\n({skipped} already configured)\nreload Herdr with: herdr server reload-config",
+            path.display()
+        )))
     }
 
     fn config_command(&mut self, args: cli::ConfigArgs) -> anyhow::Result<Output> {
@@ -811,6 +930,9 @@ Recommended keybinding (~/.config/herdr/config.toml):
    description = "toggle scratchpad"
 
 Then run: herdr server reload-config
+
+Or let the plugin write the recommended bindings:
+   herdr-scratch setup
 
 Diagnostics: herdr plugin action invoke doctor --plugin herdr.scratch
 Docs: https://github.com/AkashJana18/herdr-scratch
@@ -994,6 +1116,175 @@ fn launch_command(profile: &ProfileConfig, command_override: Option<&[String]>) 
         .unwrap_or_else(|| profile.command.clone())
 }
 
+/// Working directory of the pane a scratchpad was opened from.
+fn host_cwd(previous: Option<&crate::herdr::PaneInfo>, target: &Target) -> Option<String> {
+    previous
+        .and_then(|pane| pane.cwd.clone())
+        .or_else(|| target.context.context_cwd())
+}
+
+/// A scratchpad is a bare shell when it has no launch command; legacy records
+/// without a stored command fall back to their profile's command.
+fn bare_shell(config: &Config, record: &ScratchpadRecord) -> bool {
+    match record.launch_command.as_deref() {
+        Some(command) => command.is_empty(),
+        None => config.profile(&record.profile).command.is_empty(),
+    }
+}
+
+/// POSIX single-quote escaping for a single-argument shell word.
+fn shell_quote(path: &str) -> String {
+    let mut quoted = String::with_capacity(path.len() + 2);
+    quoted.push('\'');
+    for ch in path.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
+/// Recommended Herdr keybindings written by `setup`: (key, action, description).
+const RECOMMENDED_KEYS: &[(&str, &str, &str)] = &[
+    ("prefix+p", "herdr.scratch.toggle", "toggle scratchpad"),
+    ("prefix+shift+p", "herdr.scratch.list", "list scratchpads"),
+    (
+        "prefix+g",
+        "herdr.scratch.lazygit",
+        "toggle lazygit scratchpad",
+    ),
+    ("prefix+n", "herdr.scratch.notes", "toggle notes scratchpad"),
+    ("prefix+=", "herdr.scratch.size-up", "grow popup scratchpad"),
+    (
+        "prefix+-",
+        "herdr.scratch.size-down",
+        "shrink popup scratchpad",
+    ),
+    (
+        "prefix+f",
+        "herdr.scratch.fullscreen",
+        "toggle popup fullscreen",
+    ),
+    (
+        "prefix+r",
+        "herdr.scratch.reset",
+        "reset popup scratchpad size",
+    ),
+];
+
+fn herdr_config_path() -> PathBuf {
+    if let Ok(path) = std::env::var("HERDR_CONFIG_FILE")
+        && !path.is_empty()
+    {
+        return PathBuf::from(path);
+    }
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME")
+        && !xdg.is_empty()
+    {
+        return PathBuf::from(xdg).join("herdr/config.toml");
+    }
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".config/herdr/config.toml")
+}
+
+/// Bindings already present in the Herdr config as `herdr.scratch.*` actions.
+fn bound_actions(value: &toml::Value) -> HashSet<String> {
+    value
+        .get("keys")
+        .and_then(|keys| keys.get("command"))
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("command").and_then(toml::Value::as_str))
+        .filter(|command| command.starts_with("herdr.scratch."))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Keys already bound to any action, so `setup` never steals a user's keys.
+fn taken_keys(value: &toml::Value) -> HashSet<String> {
+    value
+        .get("keys")
+        .and_then(|keys| keys.get("command"))
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("key").and_then(toml::Value::as_str))
+        .map(str::to_string)
+        .collect()
+}
+
+fn recommended_block(bindings: &[(&str, &str, &str)]) -> String {
+    let mut out = String::new();
+    out.push_str("# Added by herdr-scratch setup\n");
+    for (key, action, description) in bindings {
+        out.push_str("[[keys.command]]\n");
+        out.push_str(&format!("key = {key:?}\n"));
+        out.push_str("type = \"plugin_action\"\n");
+        out.push_str(&format!("command = {action:?}\n"));
+        out.push_str(&format!("description = {description:?}\n"));
+    }
+    out
+}
+
+/// Recommended bindings from `RECOMMENDED_KEYS` that are NOT yet present in
+/// the given Herdr config (read-only; nothing is written).
+fn pending_keybindings(
+    path: &std::path::Path,
+) -> anyhow::Result<Vec<(&'static str, &'static str, &'static str)>> {
+    let content = if path.exists() {
+        std::fs::read_to_string(path)?
+    } else {
+        String::new()
+    };
+    let value: toml::Value = if content.trim().is_empty() {
+        toml::Value::Table(Default::default())
+    } else {
+        toml::from_str(&content).map_err(|err| {
+            anyhow::anyhow!("could not parse {path}: {err}", path = path.display())
+        })?
+    };
+    let actions = bound_actions(&value);
+    let keys = taken_keys(&value);
+    Ok(RECOMMENDED_KEYS
+        .iter()
+        .copied()
+        .filter(|(key, action, _)| !keys.contains(*key) && !actions.contains(*action))
+        .collect())
+}
+
+/// Idempotently append the recommended `[[keys.command]]` bindings to a Herdr
+/// config file. Returns the number added and the number skipped.
+fn write_keybindings(path: &std::path::Path) -> anyhow::Result<(usize, usize)> {
+    let pending = pending_keybindings(path)?;
+    let added = pending.len();
+    let skipped = RECOMMENDED_KEYS.len() - added;
+    if added == 0 {
+        return Ok((0, skipped));
+    }
+    let content = if path.exists() {
+        std::fs::read_to_string(path)?
+    } else {
+        String::new()
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut block = recommended_block(&pending);
+    if !content.is_empty() {
+        if !content.ends_with('\n') {
+            block.insert(0, '\n');
+        }
+        block.insert(0, '\n');
+    }
+    std::fs::write(path, format!("{content}{block}"))?;
+    Ok((added, skipped))
+}
+
 fn popup_size_json(size: &PopupSize) -> serde_json::Value {
     serde_json::json!({
         "width": size.width.as_arg(),
@@ -1046,6 +1337,8 @@ fn summary_for(record: &ScratchpadRecord) -> ScratchpadSummary {
         name: record.name.clone(),
         scope: record.scope.to_string(),
         status: record.status.to_string(),
+        surface: None,
+        size: None,
         cwd: record.cwd.clone(),
     }
 }
@@ -1092,6 +1385,8 @@ mod tests {
     struct FakeHerdr {
         calls: Rc<RefCell<Vec<String>>>,
         fail_show: bool,
+        popup_busy: bool,
+        backing_cwd: Option<String>,
     }
 
     impl Herdr for FakeHerdr {
@@ -1101,6 +1396,10 @@ mod tests {
 
         fn version(&self) -> Option<String> {
             Some("herdr 0.8.0".to_string())
+        }
+
+        fn server_reachable(&self) -> bool {
+            true
         }
 
         fn current_pane(&self) -> Result<PaneInfo, HerdrError> {
@@ -1134,7 +1433,11 @@ mod tests {
                 workspace_id: handle.workspace_id.clone().unwrap(),
                 tab_id: handle.focus_token().unwrap().to_string(),
                 focused: false,
-                cwd: Some("/repo".to_string()),
+                cwd: Some(
+                    self.backing_cwd
+                        .clone()
+                        .unwrap_or_else(|| "/repo".to_string()),
+                ),
             })
         }
 
@@ -1155,6 +1458,10 @@ mod tests {
             }
             if self.fail_show {
                 Err(HerdrError::Unsupported("popup already open".to_string()))
+            } else if self.popup_busy {
+                Err(HerdrError::Api(serde_json::json!({
+                    "error": { "message": "another popup is already open" }
+                })))
             } else {
                 Ok(())
             }
@@ -1216,6 +1523,13 @@ mod tests {
     }
 
     fn app_with_fake(fake: FakeHerdr) -> (tempfile::TempDir, ScratchApp<FakeHerdr>) {
+        app_with_config(fake, Config::default())
+    }
+
+    fn app_with_config(
+        fake: FakeHerdr,
+        config: Config,
+    ) -> (tempfile::TempDir, ScratchApp<FakeHerdr>) {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths {
             config_dir: dir.path().join("config"),
@@ -1223,7 +1537,7 @@ mod tests {
             config_file: dir.path().join("config/config.toml"),
             registry_file: dir.path().join("state/registry.json"),
         };
-        let app = ScratchApp::new(Config::default(), Registry::default(), paths, fake);
+        let app = ScratchApp::new(config, Registry::default(), paths, fake);
         (dir, app)
     }
 
@@ -1451,5 +1765,301 @@ mod tests {
         assert_eq!(size.width.as_arg(), "80%");
         assert_eq!(size.height.as_arg(), "80%");
         assert!(calls.borrow().contains(&format!("show:{key}:80%x80%")));
+    }
+
+    #[test]
+    fn shell_quote_single_quotes_and_escapes_embedded_quotes() {
+        assert_eq!(shell_quote("/repo"), "'/repo'");
+        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
+    fn bare_shell_detects_command_scratchpads() {
+        let mut config = Config::default();
+        let bare_record = ScratchpadRecord {
+            name: "scratch".to_string(),
+            scope: ScopeRecord {
+                kind: "workspace".to_string(),
+                key: "w1".to_string(),
+            },
+            profile: "default".to_string(),
+            status: LifecycleStatus::Available,
+            launch_command: None,
+            handle: None,
+            cwd: None,
+            created_at: now_rfc3339(),
+            last_shown_at: now_rfc3339(),
+            last_hidden_at: None,
+            previous_focus: None,
+        };
+        assert!(bare_shell(&config, &bare_record));
+
+        config.profiles.insert(
+            "lazygit".to_string(),
+            ProfileConfig {
+                command: vec!["lazygit".into()],
+                cwd: CwdMode::Context,
+                env: Default::default(),
+            },
+        );
+        let lazygit_record = ScratchpadRecord {
+            profile: "lazygit".to_string(),
+            launch_command: None,
+            ..bare_record.clone()
+        };
+        assert!(!bare_shell(&config, &lazygit_record));
+
+        let one_shot = ScratchpadRecord {
+            profile: "default".to_string(),
+            launch_command: Some(vec!["lazygit".into()]),
+            ..bare_record.clone()
+        };
+        assert!(!bare_shell(&config, &one_shot));
+        let empty_override = ScratchpadRecord {
+            launch_command: Some(vec![]),
+            ..bare_record
+        };
+        assert!(bare_shell(&config, &empty_override));
+    }
+
+    #[test]
+    fn toggle_syncs_bare_popup_to_host_cwd_after_show() {
+        let fake = FakeHerdr {
+            backing_cwd: Some("/elsewhere".to_string()),
+            ..FakeHerdr::default()
+        };
+        let calls = fake.calls.clone();
+        let (_dir, mut app) = app_with_fake(fake);
+
+        app.toggle(None, None).unwrap();
+
+        let key = app.registry.scratchpads.keys().next().unwrap().clone();
+        assert!(calls.borrow().contains(&format!("show:{key}")));
+        assert!(calls.borrow().contains(&"run:cd '/repo'".to_string()));
+        assert_eq!(
+            app.registry.scratchpads.get(&key).unwrap().cwd.as_deref(),
+            Some("/repo")
+        );
+    }
+
+    #[test]
+    fn change_path_skips_sync_when_backing_cwd_already_matches() {
+        let fake = FakeHerdr::default();
+        let calls = fake.calls.clone();
+        let (_dir, mut app) = app_with_fake(fake);
+
+        app.toggle(None, None).unwrap();
+
+        assert!(!calls.borrow().iter().any(|call| call.starts_with("run:")));
+    }
+
+    #[test]
+    fn change_path_disabled_never_syncs() {
+        let mut config = Config::default();
+        config.behavior.change_path = false;
+        let fake = FakeHerdr {
+            backing_cwd: Some("/elsewhere".to_string()),
+            ..FakeHerdr::default()
+        };
+        let calls = fake.calls.clone();
+        let (_dir, mut app) = app_with_config(fake, config);
+
+        app.toggle(None, None).unwrap();
+
+        assert!(!calls.borrow().iter().any(|call| call.starts_with("run:")));
+    }
+
+    #[test]
+    fn change_path_skips_command_scratchpads() {
+        let mut config = Config::default();
+        config.profiles.insert(
+            "lazygit".to_string(),
+            ProfileConfig {
+                command: vec!["lazygit".into()],
+                cwd: CwdMode::Context,
+                env: Default::default(),
+            },
+        );
+        config.scratchpads.insert(
+            "git".to_string(),
+            ScratchpadConfig {
+                profile: "lazygit".to_string(),
+                scope: None,
+            },
+        );
+        let fake = FakeHerdr {
+            backing_cwd: Some("/elsewhere".to_string()),
+            ..FakeHerdr::default()
+        };
+        let calls = fake.calls.clone();
+        let (_dir, mut app) = app_with_config(fake, config);
+
+        app.toggle(Some("git"), None).unwrap();
+
+        assert!(!calls.borrow().iter().any(|call| call.starts_with("run:")));
+        let key = app.registry.scratchpads.keys().next().unwrap().clone();
+        assert_eq!(
+            app.registry.scratchpads.get(&key).unwrap().cwd.as_deref(),
+            Some("/repo")
+        );
+    }
+
+    #[test]
+    fn setup_writes_recommended_keybindings_idempotently() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("herdr/config.toml");
+
+        let (added, skipped) = write_keybindings(&path).unwrap();
+        assert_eq!(added, RECOMMENDED_KEYS.len());
+        assert_eq!(skipped, 0);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        for (key, action, description) in RECOMMENDED_KEYS {
+            assert!(content.contains(&format!("key = {key:?}")));
+            assert!(content.contains(&format!("command = {action:?}")));
+            assert!(content.contains(&format!("description = {description:?}")));
+        }
+
+        let (added_again, skipped_again) = write_keybindings(&path).unwrap();
+        assert_eq!(added_again, 0);
+        assert_eq!(skipped_again, RECOMMENDED_KEYS.len());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+    }
+
+    #[test]
+    fn setup_preserves_config_and_skips_conflicting_bindings() {
+        let dir = tempfile::tempdir().unwrap();
+        let herdr_dir = dir.path().join("herdr");
+        std::fs::create_dir_all(&herdr_dir).unwrap();
+        let path = herdr_dir.join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+# existing user config
+[[keys.command]]
+key = "prefix+p"
+type = "plugin_action"
+command = "herdr.scratch.toggle"
+description = "mine"
+
+[[keys.command]]
+key = "prefix+z"
+type = "builtin"
+command = "unrelated"
+"#,
+        )
+        .unwrap();
+
+        let (added, skipped) = write_keybindings(&path).unwrap();
+        assert_eq!(added, RECOMMENDED_KEYS.len() - 1);
+        assert_eq!(skipped, 1);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.starts_with("\n# existing user config"));
+        assert!(content.contains("# Added by herdr-scratch setup"));
+        assert_eq!(content.matches("key = \"prefix+p\"").count(), 1);
+    }
+
+    #[test]
+    fn setup_appends_cleanly_to_a_file_without_a_trailing_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let herdr_dir = dir.path().join("herdr");
+        std::fs::create_dir_all(&herdr_dir).unwrap();
+        let path = herdr_dir.join("config.toml");
+        std::fs::write(&path, "[keys]").unwrap();
+
+        let (added, _) = write_keybindings(&path).unwrap();
+        assert_eq!(added, RECOMMENDED_KEYS.len());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.starts_with("[keys]\n"));
+        assert!(content.contains("# Added by herdr-scratch setup"));
+    }
+
+    #[test]
+    fn setup_rejects_malformed_config_without_touching_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let herdr_dir = dir.path().join("herdr");
+        std::fs::create_dir_all(&herdr_dir).unwrap();
+        let path = herdr_dir.join("config.toml");
+        std::fs::write(&path, "not a valid toml [[").unwrap();
+
+        assert!(write_keybindings(&path).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "not a valid toml [["
+        );
+    }
+
+    #[test]
+    fn popup_busy_show_maps_to_a_friendly_hint() {
+        let fake = FakeHerdr {
+            popup_busy: true,
+            ..FakeHerdr::default()
+        };
+        let (_dir, mut app) = app_with_fake(fake);
+
+        let err = app.toggle(None, None).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("another popup is already open; detach it with ctrl+b q")
+        );
+        let record = app.registry.scratchpads.values().next().unwrap();
+        assert_eq!(record.status, LifecycleStatus::Available);
+    }
+
+    #[test]
+    fn non_popup_show_errors_propagate_unchanged() {
+        let fake = FakeHerdr {
+            fail_show: true,
+            ..FakeHerdr::default()
+        };
+        let (_dir, mut app) = app_with_fake(fake);
+
+        let err = app.toggle(None, None).unwrap_err();
+
+        assert!(err.to_string().contains("popup already open"));
+        assert!(!err.to_string().contains("ctrl+b"));
+    }
+
+    #[test]
+    fn doctor_reports_server_and_keybinding_status() {
+        let fake = FakeHerdr::default();
+        let (_dir, app) = app_with_fake(fake);
+
+        let report = app.doctor();
+
+        assert!(report.server_ok);
+        assert_eq!(report.keybinding_missing, RECOMMENDED_KEYS.len());
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.contains("herdr-scratch setup"))
+        );
+    }
+
+    #[test]
+    fn summary_reports_surface_and_popup_size() {
+        let fake = FakeHerdr::default();
+        let (_dir, mut app) = app_with_fake(fake);
+        app.toggle(None, None).unwrap();
+        let key = app.registry.scratchpads.keys().next().unwrap().clone();
+
+        let record = app.registry.scratchpads.get(&key).unwrap().clone();
+        let summary = app.summary_for_key(&key, &record);
+        assert_eq!(summary.surface.as_deref(), Some("popup"));
+        assert_eq!(summary.size.as_deref(), Some("80%x80%"));
+
+        app.handle(cli::Command::Resize(cli::ResizeArgs {
+            direction: cli::ResizeDirection::Up,
+            name: None,
+        }))
+        .unwrap();
+        let record = app.registry.scratchpads.get(&key).unwrap().clone();
+        let summary = app.summary_for_key(&key, &record);
+        assert_eq!(summary.surface.as_deref(), Some("popup"));
+        assert_eq!(summary.size.as_deref(), Some("85%x85%"));
     }
 }

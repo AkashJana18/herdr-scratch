@@ -15,6 +15,7 @@ herdr-scratch close [name]
 herdr-scratch resize <up|down> [name]
 herdr-scratch fullscreen [name]
 herdr-scratch reset [name]
+herdr-scratch setup
 herdr-scratch list [--json]
 herdr-scratch status [name] [--json]
 herdr-scratch rename <old> <new>
@@ -55,6 +56,7 @@ restore_last_cwd = true
 close_confirmation = true
 placement = "popup"
 split_direction = "right"
+change_path = true
 resize_step = "5%"
 fullscreen_size = "100%"
 
@@ -99,6 +101,21 @@ Popup width and height accept terminal cell counts or percentage strings from
 popup scratchpads only; the size is persisted per scratchpad, and `reset`
 returns it to the configured `ui.popup` width and height.
 
+`behavior.change_path` (default `true`) mirrors floax's `@floax change_path`:
+when a bare-shell popup is shown, its backing terminal runs `cd <host-cwd>`
+where `<host-cwd>` is the directory of the focused pane at invoke time.
+Command scratchpads (any with a launch command) are never synced, and the sync
+never counts as an error if it fails. Records store the launch command as
+`launch_command` in the registry (omitted for legacy records, which fall back
+to their profile's command).
+
+Popup re-attach is resilient: `show` starts the backing Herdr session
+(`runtime.backing_session`) before attaching when it is down, and a "popup
+already open" rejection from Herdr is reported as a hint to detach with
+`ctrl+b q`. `list`/`status` include `surface` (`popup`, `split`, `tab`) and the
+current popup `size` when one is shown. `doctor` reports server reachability
+and how many recommended keybindings are still unconfigured.
+
 ## Registry
 
 Registry path:
@@ -113,7 +130,9 @@ platform data directory.
 The version-2 registry stores soft pane and terminal handles plus the backing
 session name. Version-1 split/tab records migrate without terminating or moving
 their live panes. Every command validates handles before using them; stale
-records are repaired by `open` and `toggle`.
+records are repaired by `open` and `toggle`. Records additionally store the
+popup size, previous (pre-fullscreen) size, and launch command as optional
+values, so older registries load unchanged.
 
 ## Plugin Manifest
 
@@ -144,6 +163,14 @@ persistent runtime and direct-attach viewer. Users should invoke public actions
 or CLI commands, not either internal entrypoint.
 
 ## Recommended Keybindings
+
+The plugin does not edit Herdr keybindings automatically, but `setup` writes
+them for you. `herdr-scratch setup` appends the bindings below to the Herdr
+config (from `HERDR_CONFIG_FILE`, `$XDG_CONFIG_HOME/herdr/config.toml`, or
+`~/.config/herdr/config.toml`). It is idempotent: actions already bound are
+skipped, keys already in use are left alone, and existing content and comments
+are preserved. A malformed config file is reported without being modified; run
+`herdr server reload-config` afterwards.
 
 ```toml
 [[keys.command]]
@@ -195,4 +222,9 @@ command = "herdr.scratch.reset"
 description = "reset popup scratchpad size"
 ```
 
-The plugin does not edit Herdr keybindings automatically.
+Equivalent CLI writing for the same bindings:
+
+```bash
+herdr-scratch setup
+herdr server reload-config
+```

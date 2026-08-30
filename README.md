@@ -14,9 +14,16 @@ prebuilt binaries from GitHub Releases, so users do not need Rust or Cargo.
 
 - Named scratchpads with `toggle`, `open`, `focus`, `hide`, and `close`.
 - Native 80% × 80% floating popups that detach without stopping their terminal.
+- `change_path` cwd-sync: opening a bare-shell popup cds its terminal to the
+  directory of the pane you opened it from (floax's `@floax change_path`).
 - Popup sizing: step `resize` up/down, `fullscreen` toggle, and `reset` to the
   configured size, with size persisted per scratchpad.
 - One-shot command scratchpads, such as `open lazygit -- lazygit`.
+- Resilient popups: re-attach auto-starts the backing Herdr session if it is
+  down, and popup-already-open errors explain how to detach.
+- `list`/`status` report each scratchpad's surface (`popup`/`split`/`tab`) and
+  current popup size; `doctor` checks Herdr server reachability and whether the
+  recommended keybindings are configured.
 - Scoped scratchpads: `global`, `workspace`, or `cwd`.
 - Reuse of existing live scratchpads to avoid duplicates.
 - Versioned JSON registry with stale-handle repair on `open` and `toggle`.
@@ -148,6 +155,7 @@ restore_last_cwd = true
 close_confirmation = true
 placement = "popup"
 split_direction = "right"
+change_path = true
 resize_step = "5%"
 fullscreen_size = "100%"
 
@@ -190,6 +198,7 @@ herdr-scratch close [name]
 herdr-scratch resize <up|down> [name]
 herdr-scratch fullscreen [name]
 herdr-scratch reset [name]
+herdr-scratch setup
 herdr-scratch list [--json]
 herdr-scratch status [name] [--json]
 herdr-scratch rename <old> <new>
@@ -246,6 +255,15 @@ Send a command to an existing scratchpad:
 herdr-scratch run notes "git status"
 ```
 
+One-time onboarding: write the recommended Herdr keybindings for the plugin
+actions. The write is idempotent, never overwrites the config, and skips any
+key that is already in use:
+
+```bash
+herdr-scratch setup
+herdr server reload-config
+```
+
 Resize a popup scratchpad (step from `behavior.resize_step`), toggle it
 fullscreen, or reset it to its configured size:
 
@@ -259,6 +277,12 @@ herdr-scratch reset
 Sizing applies to popup scratchpads only; a size change persists for that
 scratchpad until `reset` or a `behavior` config change.
 
+Bare-shell popups follow the pane they were opened from by default: opening a
+popup from `/path/to/project` runs `cd /path/to/project` inside it, so
+`behavior.change_path = true` keeps your scratchpad in your current project.
+Command scratchpads (`lazygit`, etc.) never receive the `cd`. Set
+`change_path = false` to disable the sync entirely.
+
 Inspect state:
 
 ```bash
@@ -267,7 +291,8 @@ herdr-scratch status notes
 herdr-scratch doctor
 ```
 
-Recommended Herdr keybindings:
+Recommended Herdr keybindings (also written automatically by
+`herdr-scratch setup`, which never steals keys you have already bound):
 
 ```toml
 [[keys.command]]
