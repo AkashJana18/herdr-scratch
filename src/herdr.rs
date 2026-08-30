@@ -28,6 +28,7 @@ const GUIDE_ENTRYPOINT: &str = "guide";
 pub trait Herdr {
     fn available(&self) -> bool;
     fn version(&self) -> Option<String>;
+    fn server_reachable(&self) -> bool;
     fn current_pane(&self) -> Result<PaneInfo, HerdrError>;
     fn open_guide(&self) -> Result<(), HerdrError>;
     fn tab_get(&self, tab_id: &str) -> Result<TabInfo, HerdrError>;
@@ -299,6 +300,10 @@ impl Herdr for HerdrCli {
             .map(|output| output.trim().to_string())
     }
 
+    fn server_reachable(&self) -> bool {
+        self.run(&["workspace".into(), "list".into()]).is_ok()
+    }
+
     fn current_pane(&self) -> Result<PaneInfo, HerdrError> {
         let value = self.run(&["pane".into(), "current".into()])?;
         parse_pane_result(value)
@@ -354,6 +359,7 @@ impl Herdr for HerdrCli {
                 .session
                 .as_deref()
                 .ok_or(HerdrError::MissingHandle("session"))?;
+            self.ensure_server(session)?;
             let terminal_id = handle
                 .terminal_id
                 .as_deref()
@@ -615,6 +621,27 @@ pub enum HerdrError {
     Unsupported(String),
 }
 
+impl HerdrError {
+    /// True when Herdr rejected an operation because another popup viewer is
+    /// already open (only one popup can be active at a time).
+    pub fn is_popup_open(&self) -> bool {
+        let Self::Api(value) = self else {
+            return false;
+        };
+        let message = value
+            .get("error")
+            .and_then(|error| {
+                error
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| error.as_str().map(str::to_string))
+            })
+            .unwrap_or_default();
+        message.to_ascii_lowercase().contains("popup")
+    }
+}
+
 #[cfg(unix)]
 fn socket_request(
     socket_path: &PathBuf,
@@ -719,6 +746,90 @@ fn target_args(session: Option<&str>, args: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_popup_open_api_errors() {
+        assert!(
+            HerdrError::Api(serde_json::json!({
+                "error": { "message": "another popup is already open" }
+            }))
+            .is_popup_open()
+        );
+        assert!(
+            HerdrError::Api(serde_json::json!({
+                "error": "PopUP 1 ALREADY OPEN"
+            }))
+            .is_popup_open()
+        );
+        assert!(
+            !HerdrError::Api(serde_json::json!({
+                "error": { "message": "terminal not found" }
+            }))
+            .is_popup_open()
+        );
+        assert!(!HerdrError::Unsupported("popup".to_string()).is_popup_open());
+    }
+
+    #[test]
+    fn show_handle_starts_backing_server_before_attaching_popup() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("herdr-fake");
+        let state = dir.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        std::fs::write(
+            &bin,
+            r#"#!/bin/sh
+STATE_DIR="$HERDR_FAKE_STATE"
+[ -n "$STATE_DIR" ] && [ -d "$STATE_DIR" ] || exit 2
+if [ "$1" = "--session" ]; then shift 2; fi
+case "$1" in
+  server)
+    touch "$STATE_DIR/server-up"
+    printf '%s\n' '{"id":"x","result":{"status":"running"}}'
+    ;;
+  workspace)
+    if [ -f "$STATE_DIR/server-up" ]; then
+      printf '%s\n' '{"id":"x","result":{"workspaces":[]}}'
+    else
+      printf 'error: server not running' >&2
+      exit 1
+    fi
+    ;;
+  plugin)
+    printf '%s\n' '{"id":"x","result":{"type":"plugin_pane_opened","plugin_pane":{"plugin_id":"herdr.scratch","entrypoint":"popup","pane":{"pane_id":"w9:p1","terminal_id":"term-9","workspace_id":"w9","tab_id":"w9:t1","focused":true}}}}'
+    ;;
+  *) exit 1 ;;
+esac
+"#,
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        unsafe { std::env::set_var("HERDR_FAKE_STATE", &state) };
+
+        let herdr = HerdrCli {
+            bin: bin.display().to_string(),
+        };
+        let handle = RuntimeHandle {
+            kind: "herdr_popup".to_string(),
+            pane_id: Some("w9:p1".to_string()),
+            terminal_id: Some("term-9".to_string()),
+            workspace_id: Some("w9".to_string()),
+            session: Some("herdr-scratch".to_string()),
+            opaque: BTreeMap::new(),
+        };
+        herdr
+            .show_handle(
+                &handle,
+                "workspace:w1:scratch",
+                &PopupConfig::default(),
+                None,
+            )
+            .unwrap();
+
+        assert!(state.join("server-up").exists());
+        unsafe { std::env::remove_var("HERDR_FAKE_STATE") };
+    }
 
     #[test]
     fn parses_plugin_pane_open_response() {

@@ -19,6 +19,11 @@ prebuilt binaries from GitHub Releases, so users do not need Rust or Cargo.
 - Popup sizing: step `resize` up/down, `fullscreen` toggle, and `reset` to the
   configured size, with size persisted per scratchpad.
 - One-shot command scratchpads, such as `open lazygit -- lazygit`.
+- Resilient popups: re-attach auto-starts the backing Herdr session if it is
+  down, and popup-already-open errors explain how to detach.
+- `list`/`status` report each scratchpad's surface (`popup`/`split`/`tab`) and
+  current popup size; `doctor` checks Herdr server reachability and whether the
+  recommended keybindings are configured.
 - Scoped scratchpads: `global`, `workspace`, or `cwd`.
 - Reuse of existing live scratchpads to avoid duplicates.
 - Versioned JSON registry with stale-handle repair on `open` and `toggle`.

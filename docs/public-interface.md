@@ -109,6 +109,13 @@ never counts as an error if it fails. Records store the launch command as
 `launch_command` in the registry (omitted for legacy records, which fall back
 to their profile's command).
 
+Popup re-attach is resilient: `show` starts the backing Herdr session
+(`runtime.backing_session`) before attaching when it is down, and a "popup
+already open" rejection from Herdr is reported as a hint to detach with
+`ctrl+b q`. `list`/`status` include `surface` (`popup`, `split`, `tab`) and the
+current popup `size` when one is shown. `doctor` reports server reachability
+and how many recommended keybindings are still unconfigured.
+
 ## Registry
 
 Registry path:

@@ -33,12 +33,16 @@ pub fn print(output: Output) -> anyhow::Result<()> {
                 return Ok(());
             }
             for item in scratchpads {
+                let surface = item.surface.as_deref().unwrap_or("-");
+                let size = item.size.as_deref().unwrap_or("-");
                 println!(
-                    "{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}",
                     item.name,
                     item.status,
                     item.scope,
-                    item.cwd.unwrap_or_else(|| "-".to_string())
+                    item.cwd.unwrap_or_else(|| "-".to_string()),
+                    surface,
+                    size
                 );
             }
             Ok(())
@@ -70,12 +74,19 @@ fn format_doctor(report: &DoctorReport) -> String {
             "herdr version: {}",
             report.herdr_version.as_deref().unwrap_or("unknown")
         ),
+        format!("server: {}", status_word(report.server_ok)),
         format!("config dir: {}", report.config_dir),
         format!("config: {}", report.config_path),
         format!("state dir: {}", report.state_dir),
         format!("state: {}", report.state_path),
         format!("scratchpads: {}", report.scratchpad_count),
     ];
+    if report.keybinding_missing > 0 {
+        lines.push(format!(
+            "keybindings: {} not configured (run `herdr-scratch setup`)",
+            report.keybinding_missing
+        ));
+    }
     lines.extend(report.issues.iter().map(|issue| format!("issue: {issue}")));
     lines.push("next: herdr plugin action invoke guide --plugin herdr.scratch".to_string());
     lines.join("\n")
@@ -90,16 +101,19 @@ mod tests {
         let report = DoctorReport {
             herdr_available: true,
             herdr_version: Some("herdr 0.8.0".to_string()),
+            server_ok: true,
             config_dir: "/config".to_string(),
             config_path: "/config/config.toml".to_string(),
             state_dir: "/state".to_string(),
             state_path: "/state/registry.json".to_string(),
             scratchpad_count: 0,
+            keybinding_missing: 0,
             issues: Vec::new(),
         };
 
         let output = format_doctor(&report);
         assert!(output.contains("herdr: ok"));
+        assert!(output.contains("server: ok"));
         assert!(output.ends_with("next: herdr plugin action invoke guide --plugin herdr.scratch"));
     }
 }
