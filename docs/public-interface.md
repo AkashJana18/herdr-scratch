@@ -12,6 +12,9 @@ herdr-scratch open [name] [-- <command>...]
 herdr-scratch focus [name]
 herdr-scratch hide [name]
 herdr-scratch close [name]
+herdr-scratch resize <up|down> [name]
+herdr-scratch fullscreen [name]
+herdr-scratch reset [name]
 herdr-scratch list [--json]
 herdr-scratch status [name] [--json]
 herdr-scratch rename <old> <new>
@@ -52,6 +55,8 @@ restore_last_cwd = true
 close_confirmation = true
 placement = "popup"
 split_direction = "right"
+resize_step = "5%"
+fullscreen_size = "100%"
 
 [ui]
 title_template = "scratch:{name}"
@@ -88,6 +93,12 @@ remain supported placement values for existing configurations.
 Popup width and height accept terminal cell counts or percentage strings from
 `"1%"` through `"100%"`. Herdr clamps dimensions below its popup minimum.
 
+`behavior.resize_step` (default `"5%"`) is the delta applied by `resize up` and
+`resize down` in the dimension's own unit. `behavior.fullscreen_size` (default
+`"100%"`) is the size applied by `fullscreen`. Resize and fullscreen apply to
+popup scratchpads only; the size is persisted per scratchpad, and `reset`
+returns it to the configured `ui.popup` width and height.
+
 ## Registry
 
 Registry path:
@@ -122,6 +133,10 @@ herdr.scratch.lazygit
 herdr.scratch.notes
 herdr.scratch.list
 herdr.scratch.doctor
+herdr.scratch.size-up
+herdr.scratch.size-down
+herdr.scratch.fullscreen
+herdr.scratch.reset
 ```
 
 The manifest declares internal `scratch` and `popup` pane entrypoints for the
@@ -154,6 +169,30 @@ key = "prefix+n"
 type = "plugin_action"
 command = "herdr.scratch.notes"
 description = "toggle notes scratchpad"
+
+[[keys.command]]
+key = "prefix+="
+type = "plugin_action"
+command = "herdr.scratch.size-up"
+description = "grow popup scratchpad"
+
+[[keys.command]]
+key = "prefix+-"
+type = "plugin_action"
+command = "herdr.scratch.size-down"
+description = "shrink popup scratchpad"
+
+[[keys.command]]
+key = "prefix+f"
+type = "plugin_action"
+command = "herdr.scratch.fullscreen"
+description = "toggle popup fullscreen"
+
+[[keys.command]]
+key = "prefix+r"
+type = "plugin_action"
+command = "herdr.scratch.reset"
+description = "reset popup scratchpad size"
 ```
 
 The plugin does not edit Herdr keybindings automatically.

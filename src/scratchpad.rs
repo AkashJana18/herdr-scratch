@@ -8,7 +8,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     cli,
-    config::{Config, CwdMode, Paths, ProfileConfig, ScopeKind, ScratchpadConfig},
+    config::{
+        Config, CwdMode, Paths, PopupDimension, PopupSize, ProfileConfig, ScopeKind,
+        ScratchpadConfig,
+    },
     herdr::{Herdr, HerdrCli, OpenScratchpadRequest},
     output::Output,
     registry::{
@@ -77,6 +80,9 @@ impl<H: Herdr> ScratchApp<H> {
             cli::Command::Rename(args) => self.rename(&args.old, &args.new),
             cli::Command::Send(args) => self.send(&args.name, &args.text.join(" ")),
             cli::Command::Run(args) => self.run_in_scratchpad(&args.name, &args.command.join(" ")),
+            cli::Command::Resize(args) => self.resize(args.direction, args.name.as_deref()),
+            cli::Command::Fullscreen(args) => self.fullscreen(args.name.as_deref()),
+            cli::Command::Reset(args) => self.reset(args.name.as_deref()),
             cli::Command::Doctor(args) => Ok(Output::Doctor {
                 report: self.doctor(),
                 json: args.json,
@@ -147,7 +153,7 @@ impl<H: Herdr> ScratchApp<H> {
         self.ensure_live(handle)?;
         if !self.store.viewer_is_active(&target.key) {
             self.herdr
-                .show_handle(handle, &target.key, &self.config.ui.popup)?;
+                .show_handle(handle, &target.key, &self.config.ui.popup, None)?;
         }
         self.update_visible(&target.key, current.map(FocusSnapshot::from));
         self.save()?;
@@ -264,6 +270,132 @@ impl<H: Herdr> ScratchApp<H> {
         )))
     }
 
+    fn resize(
+        &mut self,
+        direction: cli::ResizeDirection,
+        name: Option<&str>,
+    ) -> anyhow::Result<Output> {
+        let current = self.herdr.current_pane().ok();
+        let target = self.target(name, current.as_ref())?;
+        let mut record = self.live_record(&target)?;
+        let current_size = self.popup_size(&record)?;
+        let step = &self.config.behavior.resize_step;
+        let up = direction == cli::ResizeDirection::Up;
+        let size = PopupSize {
+            width: current_size.width.apply_step(step, up),
+            height: current_size.height.apply_step(step, up),
+        };
+        self.apply_popup_size(&target, &mut record, size)?;
+        Ok(Output::Text(format!(
+            "resized scratchpad `{}`",
+            target.name
+        )))
+    }
+
+    fn fullscreen(&mut self, name: Option<&str>) -> anyhow::Result<Output> {
+        let current = self.herdr.current_pane().ok();
+        let target = self.target(name, current.as_ref())?;
+        let mut record = self.live_record(&target)?;
+        let current_size = self.popup_size(&record)?;
+        let fullsize = self.config.behavior.fullscreen_size.clone();
+        let full_size = PopupSize {
+            width: fullsize.clone(),
+            height: fullsize,
+        };
+        let size = if current_size == full_size {
+            self.stored_previous_size(&record)
+                .unwrap_or_else(|| PopupSize {
+                    width: self.config.ui.popup.width.clone(),
+                    height: self.config.ui.popup.height.clone(),
+                })
+        } else {
+            self.store_previous_size(&mut record, &current_size);
+            full_size
+        };
+        self.apply_popup_size(&target, &mut record, size)?;
+        Ok(Output::Text(format!(
+            "toggled scratchpad `{}` fullscreen",
+            target.name
+        )))
+    }
+
+    fn reset(&mut self, name: Option<&str>) -> anyhow::Result<Output> {
+        let current = self.herdr.current_pane().ok();
+        let target = self.target(name, current.as_ref())?;
+        let mut record = self.live_record(&target)?;
+        let size = PopupSize {
+            width: self.config.ui.popup.width.clone(),
+            height: self.config.ui.popup.height.clone(),
+        };
+        self.apply_popup_size(&target, &mut record, size)?;
+        Ok(Output::Text(format!(
+            "reset scratchpad `{}` to its configured size",
+            target.name
+        )))
+    }
+
+    fn live_record(&self, target: &Target) -> anyhow::Result<ScratchpadRecord> {
+        let Some(record) = self.registry.scratchpads.get(&target.key).cloned() else {
+            anyhow::bail!("scratchpad `{}` is not open", target.name);
+        };
+        if record.handle.is_none() {
+            anyhow::bail!("scratchpad `{}` has no live runtime", target.name);
+        }
+        Ok(record)
+    }
+
+    fn popup_size(&self, record: &ScratchpadRecord) -> anyhow::Result<PopupSize> {
+        let Some(handle) = record.handle.as_ref() else {
+            anyhow::bail!("scratchpad has no live runtime");
+        };
+        if !handle.is_popup() {
+            anyhow::bail!("popup sizing applies to popup scratchpads only");
+        }
+        self.ensure_live(handle)?;
+        Ok(stored_popup_size(handle).unwrap_or_else(|| self.config.ui.popup.size()))
+    }
+
+    fn stored_previous_size(&self, record: &ScratchpadRecord) -> Option<PopupSize> {
+        stored_popup_size_key(record.handle.as_ref()?, "previous_size")
+    }
+
+    fn store_previous_size(&mut self, record: &mut ScratchpadRecord, size: &PopupSize) {
+        if let Some(handle) = record.handle.as_mut() {
+            handle
+                .opaque
+                .insert("previous_size".to_string(), popup_size_json(size));
+        }
+    }
+
+    fn apply_popup_size(
+        &mut self,
+        target: &Target,
+        record: &mut ScratchpadRecord,
+        size: PopupSize,
+    ) -> anyhow::Result<()> {
+        let Some(handle) = record.handle.as_ref() else {
+            anyhow::bail!("scratchpad has no live runtime");
+        };
+        if self.store.viewer_is_active(&target.key) {
+            self.herdr.hide_handle(handle)?;
+        }
+        self.herdr
+            .show_handle(handle, &target.key, &self.config.ui.popup, Some(&size))?;
+
+        let mut handle = handle.clone();
+        handle
+            .opaque
+            .insert("size".to_string(), popup_size_json(&size));
+        record.handle = Some(handle);
+        let previous = self.herdr.current_pane().ok().map(FocusSnapshot::from);
+        record.status = LifecycleStatus::Visible;
+        record.last_shown_at = now_rfc3339();
+        record.previous_focus = previous;
+        self.registry.insert(target.key.clone(), record.clone());
+        self.save()?;
+        Ok(())
+    }
+
     fn activate_or_open(
         &mut self,
         target: Target,
@@ -286,7 +418,7 @@ impl<H: Herdr> ScratchApp<H> {
                 )));
             }
             self.herdr
-                .show_handle(handle, &target.key, &self.config.ui.popup)?;
+                .show_handle(handle, &target.key, &self.config.ui.popup, None)?;
             self.update_visible(&target.key, previous.map(FocusSnapshot::from));
             self.save()?;
             return Ok(Output::Text(format!("opened scratchpad `{}`", target.name)));
@@ -307,7 +439,10 @@ impl<H: Herdr> ScratchApp<H> {
         let key = target.key.clone();
         self.registry.insert(key.clone(), record);
         self.save()?;
-        if let Err(err) = self.herdr.show_handle(&handle, &key, &self.config.ui.popup) {
+        if let Err(err) = self
+            .herdr
+            .show_handle(&handle, &key, &self.config.ui.popup, None)
+        {
             if let Some(record) = self.registry.scratchpads.get_mut(&key) {
                 record.status = LifecycleStatus::Available;
             }
@@ -859,6 +994,24 @@ fn launch_command(profile: &ProfileConfig, command_override: Option<&[String]>) 
         .unwrap_or_else(|| profile.command.clone())
 }
 
+fn popup_size_json(size: &PopupSize) -> serde_json::Value {
+    serde_json::json!({
+        "width": size.width.as_arg(),
+        "height": size.height.as_arg(),
+    })
+}
+
+fn stored_popup_size(handle: &RuntimeHandle) -> Option<PopupSize> {
+    stored_popup_size_key(handle, "size")
+}
+
+fn stored_popup_size_key(handle: &RuntimeHandle, key: &str) -> Option<PopupSize> {
+    let value = handle.opaque.get(key)?;
+    let width = PopupDimension::parse_str(value.get("width")?.as_str()?)?;
+    let height = PopupDimension::parse_str(value.get("height")?.as_str()?)?;
+    Some(PopupSize { width, height })
+}
+
 fn parse_scope(raw: Option<&str>) -> anyhow::Result<ScopeKind> {
     match raw.unwrap_or("workspace") {
         "global" => Ok(ScopeKind::Global),
@@ -990,8 +1143,16 @@ mod tests {
             _handle: &RuntimeHandle,
             registry_key: &str,
             _popup: &PopupConfig,
+            size: Option<&PopupSize>,
         ) -> Result<(), HerdrError> {
-            self.calls.borrow_mut().push(format!("show:{registry_key}"));
+            match size {
+                Some(size) => self.calls.borrow_mut().push(format!(
+                    "show:{registry_key}:{}x{}",
+                    size.width.as_arg(),
+                    size.height.as_arg()
+                )),
+                None => self.calls.borrow_mut().push(format!("show:{registry_key}")),
+            }
             if self.fail_show {
                 Err(HerdrError::Unsupported("popup already open".to_string()))
             } else {
@@ -1198,5 +1359,97 @@ mod tests {
             app.registry.scratchpads.get(&key).unwrap().status,
             LifecycleStatus::Available
         );
+    }
+
+    #[test]
+    fn resize_steps_a_popup_and_persists_the_size() {
+        let fake = FakeHerdr::default();
+        let calls = fake.calls.clone();
+        let (_dir, mut app) = app_with_fake(fake);
+        app.toggle(None, None).unwrap();
+        let key = app.registry.scratchpads.keys().next().unwrap().clone();
+
+        app.handle(cli::Command::Resize(cli::ResizeArgs {
+            direction: cli::ResizeDirection::Up,
+            name: None,
+        }))
+        .unwrap();
+
+        let record = app.registry.scratchpads.get(&key).unwrap();
+        let size = stored_popup_size(record.handle.as_ref().unwrap()).unwrap();
+        assert_eq!(size.width.as_arg(), "85%");
+        assert_eq!(size.height.as_arg(), "85%");
+        assert!(calls.borrow().contains(&format!("show:{key}:85%x85%")));
+
+        app.handle(cli::Command::Resize(cli::ResizeArgs {
+            direction: cli::ResizeDirection::Down,
+            name: None,
+        }))
+        .unwrap();
+        let size = stored_popup_size(
+            app.registry
+                .scratchpads
+                .get(&key)
+                .unwrap()
+                .handle
+                .as_ref()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(size.width.as_arg(), "80%");
+        assert_eq!(size.height.as_arg(), "80%");
+    }
+
+    #[test]
+    fn fullscreen_toggles_and_restores_the_previous_size() {
+        let fake = FakeHerdr::default();
+        let calls = fake.calls.clone();
+        let (_dir, mut app) = app_with_fake(fake);
+        app.toggle(None, None).unwrap();
+
+        app.handle(cli::Command::Resize(cli::ResizeArgs {
+            direction: cli::ResizeDirection::Down,
+            name: None,
+        }))
+        .unwrap();
+        let key = app.registry.scratchpads.keys().next().unwrap().clone();
+
+        app.handle(cli::Command::Fullscreen(cli::NameArg { name: None }))
+            .unwrap();
+        let record = app.registry.scratchpads.get(&key).unwrap();
+        let size = stored_popup_size(record.handle.as_ref().unwrap()).unwrap();
+        assert_eq!(size.width.as_arg(), "100%");
+        assert_eq!(size.height.as_arg(), "100%");
+        assert!(calls.borrow().contains(&format!("show:{key}:100%x100%")));
+
+        app.handle(cli::Command::Fullscreen(cli::NameArg { name: None }))
+            .unwrap();
+        let record = app.registry.scratchpads.get(&key).unwrap();
+        let size = stored_popup_size(record.handle.as_ref().unwrap()).unwrap();
+        assert_eq!(size.width.as_arg(), "75%");
+        assert_eq!(size.height.as_arg(), "75%");
+    }
+
+    #[test]
+    fn reset_returns_a_popup_to_its_configured_size() {
+        let fake = FakeHerdr::default();
+        let calls = fake.calls.clone();
+        let (_dir, mut app) = app_with_fake(fake);
+        app.toggle(None, None).unwrap();
+        let key = app.registry.scratchpads.keys().next().unwrap().clone();
+
+        app.handle(cli::Command::Resize(cli::ResizeArgs {
+            direction: cli::ResizeDirection::Up,
+            name: None,
+        }))
+        .unwrap();
+        app.handle(cli::Command::Reset(cli::NameArg { name: None }))
+            .unwrap();
+
+        let record = app.registry.scratchpads.get(&key).unwrap();
+        let size = stored_popup_size(record.handle.as_ref().unwrap()).unwrap();
+        assert_eq!(size.width.as_arg(), "80%");
+        assert_eq!(size.height.as_arg(), "80%");
+        assert!(calls.borrow().contains(&format!("show:{key}:80%x80%")));
     }
 }

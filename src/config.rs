@@ -114,6 +114,10 @@ pub struct BehaviorConfig {
     pub close_confirmation: bool,
     pub placement: ScratchpadPlacement,
     pub split_direction: SplitDirection,
+    /// Popup size delta applied by `resize up` and `resize down`.
+    pub resize_step: PopupDimension,
+    /// Popup size used by `fullscreen`.
+    pub fullscreen_size: PopupDimension,
 }
 
 impl Default for BehaviorConfig {
@@ -125,6 +129,8 @@ impl Default for BehaviorConfig {
             close_confirmation: true,
             placement: ScratchpadPlacement::Popup,
             split_direction: SplitDirection::Right,
+            resize_step: PopupDimension::Percent("5%".to_string()),
+            fullscreen_size: PopupDimension::Percent("100%".to_string()),
         }
     }
 }
@@ -199,6 +205,27 @@ impl Default for PopupConfig {
     }
 }
 
+impl PopupConfig {
+    pub fn size(&self) -> PopupSize {
+        PopupSize {
+            width: self.width.clone(),
+            height: self.height.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PopupSize {
+    pub width: PopupDimension,
+    pub height: PopupDimension,
+}
+
+impl PopupSize {
+    pub fn to_arg_pairs(&self) -> (String, String) {
+        (self.width.as_arg(), self.height.as_arg())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum PopupDimension {
@@ -211,6 +238,50 @@ impl PopupDimension {
         match self {
             Self::Cells(value) => value.to_string(),
             Self::Percent(value) => value.clone(),
+        }
+    }
+
+    /// Parse a stored dimension string (`"NN"` cells or `"NN%"` percentage).
+    pub fn parse_str(raw: &str) -> Option<Self> {
+        if let Some(percent) = raw.strip_suffix('%') {
+            let value = percent.parse::<u16>().ok()?;
+            if (1..=100).contains(&value) {
+                return Some(Self::Percent(format!("{value}%")));
+            }
+            None
+        } else {
+            raw.parse::<u16>()
+                .ok()
+                .filter(|value| *value > 0)
+                .map(Self::Cells)
+        }
+    }
+
+    /// Move a popup dimension toward fullscreen (`up`) or smaller (`down`).
+    ///
+    /// Mixed units follow the dimension's own unit: a percentage step applies to
+    /// a percentage dimension, and an absolute-cell step applies to a cell
+    /// dimension. Results clamp to a sane outer popup range.
+    pub fn apply_step(&self, step: &PopupDimension, up: bool) -> Self {
+        match self {
+            Self::Percent(_) => {
+                let current = percent_points(self).unwrap_or(80).clamp(10, 100);
+                let delta = percent_points(step).unwrap_or(5).abs().max(1);
+                let next = if up { current + delta } else { current - delta };
+                Self::Percent(format!("{}%", next.clamp(10, 100)))
+            }
+            Self::Cells(_) => {
+                let current = match self {
+                    Self::Cells(value) => i32::from(*value),
+                    Self::Percent(_) => unreachable!("matched branch"),
+                };
+                let delta = match step {
+                    Self::Cells(value) => i32::from(*value),
+                    Self::Percent(_) => percent_points(step).unwrap_or(5).abs().max(1),
+                };
+                let next = if up { current + delta } else { current - delta };
+                Self::Cells(next.clamp(1, i32::from(u16::MAX)) as u16)
+            }
         }
     }
 
@@ -231,6 +302,13 @@ impl PopupDimension {
                 Ok(())
             }
         }
+    }
+}
+
+fn percent_points(value: &PopupDimension) -> Option<i32> {
+    match value {
+        PopupDimension::Percent(raw) => raw.strip_suffix('%')?.parse().ok(),
+        PopupDimension::Cells(cells) => Some(i32::from(*cells)),
     }
 }
 
@@ -367,6 +445,68 @@ mod tests {
         assert_eq!(config.ui.popup.width.as_arg(), "80%");
         assert_eq!(config.runtime.backing_session, "herdr-scratch");
         assert!(config.profiles.contains_key("default"));
+        assert_eq!(config.behavior.resize_step.as_arg(), "5%");
+        assert_eq!(config.behavior.fullscreen_size.as_arg(), "100%");
+    }
+
+    #[test]
+    fn parses_resize_config_keys() {
+        let config: Config = toml::from_str(
+            r#"
+version = 1
+
+[behavior]
+resize_step = "4%"
+fullscreen_size = "95%"
+        "#,
+        )
+        .unwrap();
+        assert_eq!(config.behavior.resize_step.as_arg(), "4%");
+        assert_eq!(config.behavior.fullscreen_size.as_arg(), "95%");
+    }
+
+    #[test]
+    fn popup_dimension_parse_str_round_trips() {
+        assert_eq!(PopupDimension::parse_str("85%").unwrap().as_arg(), "85%");
+        assert_eq!(PopupDimension::parse_str("42").unwrap().as_arg(), "42");
+        assert_eq!(PopupDimension::parse_str("0%"), None);
+        assert_eq!(PopupDimension::parse_str("101%"), None);
+        assert_eq!(PopupDimension::parse_str("0"), None);
+        assert_eq!(PopupDimension::parse_str("nope"), None);
+    }
+
+    #[test]
+    fn resize_step_moves_percent_dimensions_and_clamps() {
+        let base = PopupDimension::Percent("80%".to_string());
+        let step = PopupDimension::Percent("5%".to_string());
+        assert_eq!(base.apply_step(&step, true).as_arg(), "85%");
+        assert_eq!(base.apply_step(&step, false).as_arg(), "75%");
+        let at_floor = PopupDimension::Percent("12%".to_string());
+        assert_eq!(at_floor.apply_step(&step, false).as_arg(), "10%");
+        let near_ceiling = PopupDimension::Percent("97%".to_string());
+        assert_eq!(near_ceiling.apply_step(&step, true).as_arg(), "100%");
+    }
+
+    #[test]
+    fn resize_step_moves_cell_dimensions() {
+        let base = PopupDimension::Cells(80);
+        let step = PopupDimension::Cells(5);
+        assert_eq!(base.apply_step(&step, true).as_arg(), "85");
+        assert_eq!(base.apply_step(&step, false).as_arg(), "75");
+        assert_eq!(
+            PopupDimension::Cells(3).apply_step(&step, false).as_arg(),
+            "1"
+        );
+    }
+
+    #[test]
+    fn mixed_resize_step_follows_dimension_unit() {
+        let percent = PopupDimension::Percent("50%".to_string());
+        let cells_step = PopupDimension::Cells(7);
+        assert_eq!(percent.apply_step(&cells_step, true).as_arg(), "57%");
+        let cells = PopupDimension::Cells(50);
+        let percent_step = PopupDimension::Percent("7%".to_string());
+        assert_eq!(cells.apply_step(&percent_step, true).as_arg(), "57");
     }
 
     #[test]
