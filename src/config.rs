@@ -114,6 +114,9 @@ pub struct BehaviorConfig {
     pub close_confirmation: bool,
     pub placement: ScratchpadPlacement,
     pub split_direction: SplitDirection,
+    /// Sync a popup scratchpad's working directory to the pane it was opened
+    /// from (the `change_path` floax behavior).
+    pub change_path: bool,
     /// Popup size delta applied by `resize up` and `resize down`.
     pub resize_step: PopupDimension,
     /// Popup size used by `fullscreen`.
@@ -129,6 +132,7 @@ impl Default for BehaviorConfig {
             close_confirmation: true,
             placement: ScratchpadPlacement::Popup,
             split_direction: SplitDirection::Right,
+            change_path: true,
             resize_step: PopupDimension::Percent("5%".to_string()),
             fullscreen_size: PopupDimension::Percent("100%".to_string()),
         }
@@ -447,6 +451,7 @@ mod tests {
         assert!(config.profiles.contains_key("default"));
         assert_eq!(config.behavior.resize_step.as_arg(), "5%");
         assert_eq!(config.behavior.fullscreen_size.as_arg(), "100%");
+        assert!(config.behavior.change_path);
     }
 
     #[test]
@@ -458,11 +463,13 @@ version = 1
 [behavior]
 resize_step = "4%"
 fullscreen_size = "95%"
+change_path = false
         "#,
         )
         .unwrap();
         assert_eq!(config.behavior.resize_step.as_arg(), "4%");
         assert_eq!(config.behavior.fullscreen_size.as_arg(), "95%");
+        assert!(!config.behavior.change_path);
     }
 
     #[test]
