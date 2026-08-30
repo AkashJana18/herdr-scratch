@@ -175,6 +175,8 @@ pub struct ScratchpadRecord {
     pub profile: String,
     pub status: LifecycleStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_command: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handle: Option<RuntimeHandle>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
@@ -299,6 +301,7 @@ mod tests {
                 scope,
                 profile: "default".to_string(),
                 status: LifecycleStatus::Available,
+                launch_command: None,
                 handle: None,
                 cwd: Some("/repo".to_string()),
                 created_at: now_rfc3339(),

@@ -55,6 +55,7 @@ restore_last_cwd = true
 close_confirmation = true
 placement = "popup"
 split_direction = "right"
+change_path = true
 resize_step = "5%"
 fullscreen_size = "100%"
 
@@ -99,6 +100,14 @@ Popup width and height accept terminal cell counts or percentage strings from
 popup scratchpads only; the size is persisted per scratchpad, and `reset`
 returns it to the configured `ui.popup` width and height.
 
+`behavior.change_path` (default `true`) mirrors floax's `@floax change_path`:
+when a bare-shell popup is shown, its backing terminal runs `cd <host-cwd>`
+where `<host-cwd>` is the directory of the focused pane at invoke time.
+Command scratchpads (any with a launch command) are never synced, and the sync
+never counts as an error if it fails. Records store the launch command as
+`launch_command` in the registry (omitted for legacy records, which fall back
+to their profile's command).
+
 ## Registry
 
 Registry path:
@@ -113,7 +122,9 @@ platform data directory.
 The version-2 registry stores soft pane and terminal handles plus the backing
 session name. Version-1 split/tab records migrate without terminating or moving
 their live panes. Every command validates handles before using them; stale
-records are repaired by `open` and `toggle`.
+records are repaired by `open` and `toggle`. Records additionally store the
+popup size, previous (pre-fullscreen) size, and launch command as optional
+values, so older registries load unchanged.
 
 ## Plugin Manifest
 

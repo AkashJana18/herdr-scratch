@@ -14,6 +14,8 @@ prebuilt binaries from GitHub Releases, so users do not need Rust or Cargo.
 
 - Named scratchpads with `toggle`, `open`, `focus`, `hide`, and `close`.
 - Native 80% × 80% floating popups that detach without stopping their terminal.
+- `change_path` cwd-sync: opening a bare-shell popup cds its terminal to the
+  directory of the pane you opened it from (floax's `@floax change_path`).
 - Popup sizing: step `resize` up/down, `fullscreen` toggle, and `reset` to the
   configured size, with size persisted per scratchpad.
 - One-shot command scratchpads, such as `open lazygit -- lazygit`.
@@ -148,6 +150,7 @@ restore_last_cwd = true
 close_confirmation = true
 placement = "popup"
 split_direction = "right"
+change_path = true
 resize_step = "5%"
 fullscreen_size = "100%"
 
@@ -258,6 +261,12 @@ herdr-scratch reset
 
 Sizing applies to popup scratchpads only; a size change persists for that
 scratchpad until `reset` or a `behavior` config change.
+
+Bare-shell popups follow the pane they were opened from by default: opening a
+popup from `/path/to/project` runs `cd /path/to/project` inside it, so
+`behavior.change_path = true` keeps your scratchpad in your current project.
+Command scratchpads (`lazygit`, etc.) never receive the `cd`. Set
+`change_path = false` to disable the sync entirely.
 
 Inspect state:
 

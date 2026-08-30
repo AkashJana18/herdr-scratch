@@ -154,6 +154,7 @@ impl<H: Herdr> ScratchApp<H> {
         if !self.store.viewer_is_active(&target.key) {
             self.herdr
                 .show_handle(handle, &target.key, &self.config.ui.popup, None)?;
+            self.ensure_path_sync(&target, host_cwd(current.as_ref(), &target).as_deref());
         }
         self.update_visible(&target.key, current.map(FocusSnapshot::from));
         self.save()?;
@@ -403,6 +404,7 @@ impl<H: Herdr> ScratchApp<H> {
         command: Option<Vec<String>>,
     ) -> anyhow::Result<Output> {
         let existing = self.registry.scratchpads.get(&target.key).cloned();
+        let host_cwd = host_cwd(previous.as_ref(), &target);
         if self.config.behavior.reuse_existing
             && let Some(record) = existing.as_ref()
             && let Some(handle) = record.handle.as_ref()
@@ -419,6 +421,7 @@ impl<H: Herdr> ScratchApp<H> {
             }
             self.herdr
                 .show_handle(handle, &target.key, &self.config.ui.popup, None)?;
+            self.ensure_path_sync(&target, host_cwd.as_deref());
             self.update_visible(&target.key, previous.map(FocusSnapshot::from));
             self.save()?;
             return Ok(Output::Text(format!("opened scratchpad `{}`", target.name)));
@@ -449,6 +452,7 @@ impl<H: Herdr> ScratchApp<H> {
             self.save()?;
             return Err(err.into());
         }
+        self.ensure_path_sync(&target, host_cwd.as_deref());
         self.update_visible(&key, previous_focus);
         self.save()?;
         Ok(Output::Text(format!("opened scratchpad `{name}`")))
@@ -490,11 +494,13 @@ impl<H: Herdr> ScratchApp<H> {
         })?;
         self.rename_handle_best_effort(&handle, &self.title_for(&target.name));
         let now = now_rfc3339();
+        let stored_command = (!launch_command.is_empty()).then_some(launch_command);
         Ok(ScratchpadRecord {
             name: target.name.clone(),
             scope: target.scope.clone(),
             profile: scratch_config.profile,
             status: LifecycleStatus::Visible,
+            launch_command: stored_command,
             handle: Some(handle),
             cwd,
             created_at: previous_record
@@ -555,6 +561,48 @@ impl<H: Herdr> ScratchApp<H> {
             self.herdr.tab_get(focus_token)?;
         }
         Ok(())
+    }
+
+    /// Mirrors the floax `change_path` behavior: after a bare-shell popup is
+    /// shown, cd its backing terminal to the directory of the pane it was
+    /// opened from. This is best-effort; a failed sync never breaks the open.
+    fn ensure_path_sync(&mut self, target: &Target, host_cwd: Option<&str>) {
+        if !self.config.behavior.change_path {
+            return;
+        }
+        let Some(host_cwd) = host_cwd.filter(|cwd| !cwd.is_empty()) else {
+            return;
+        };
+        let Some(record) = self.registry.scratchpads.get(&target.key).cloned() else {
+            return;
+        };
+        if !bare_shell(&self.config, &record) {
+            return;
+        }
+        let Some(handle) = record.handle else {
+            return;
+        };
+        if !handle.is_popup() {
+            return;
+        }
+        let current = self
+            .herdr
+            .handle_get(&handle)
+            .ok()
+            .and_then(|info| info.cwd);
+        if current.as_deref() == Some(host_cwd) {
+            return;
+        }
+        if self
+            .herdr
+            .run_command(&handle, &format!("cd {}", shell_quote(host_cwd)))
+            .is_err()
+        {
+            return;
+        }
+        if let Some(record) = self.registry.scratchpads.get_mut(&target.key) {
+            record.cwd = Some(host_cwd.to_string());
+        }
     }
 
     fn update_visible(&mut self, key: &str, previous: Option<FocusSnapshot>) {
@@ -994,6 +1042,37 @@ fn launch_command(profile: &ProfileConfig, command_override: Option<&[String]>) 
         .unwrap_or_else(|| profile.command.clone())
 }
 
+/// Working directory of the pane a scratchpad was opened from.
+fn host_cwd(previous: Option<&crate::herdr::PaneInfo>, target: &Target) -> Option<String> {
+    previous
+        .and_then(|pane| pane.cwd.clone())
+        .or_else(|| target.context.context_cwd())
+}
+
+/// A scratchpad is a bare shell when it has no launch command; legacy records
+/// without a stored command fall back to their profile's command.
+fn bare_shell(config: &Config, record: &ScratchpadRecord) -> bool {
+    match record.launch_command.as_deref() {
+        Some(command) => command.is_empty(),
+        None => config.profile(&record.profile).command.is_empty(),
+    }
+}
+
+/// POSIX single-quote escaping for a single-argument shell word.
+fn shell_quote(path: &str) -> String {
+    let mut quoted = String::with_capacity(path.len() + 2);
+    quoted.push('\'');
+    for ch in path.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
 fn popup_size_json(size: &PopupSize) -> serde_json::Value {
     serde_json::json!({
         "width": size.width.as_arg(),
@@ -1092,6 +1171,7 @@ mod tests {
     struct FakeHerdr {
         calls: Rc<RefCell<Vec<String>>>,
         fail_show: bool,
+        backing_cwd: Option<String>,
     }
 
     impl Herdr for FakeHerdr {
@@ -1134,7 +1214,11 @@ mod tests {
                 workspace_id: handle.workspace_id.clone().unwrap(),
                 tab_id: handle.focus_token().unwrap().to_string(),
                 focused: false,
-                cwd: Some("/repo".to_string()),
+                cwd: Some(
+                    self.backing_cwd
+                        .clone()
+                        .unwrap_or_else(|| "/repo".to_string()),
+                ),
             })
         }
 
@@ -1216,6 +1300,13 @@ mod tests {
     }
 
     fn app_with_fake(fake: FakeHerdr) -> (tempfile::TempDir, ScratchApp<FakeHerdr>) {
+        app_with_config(fake, Config::default())
+    }
+
+    fn app_with_config(
+        fake: FakeHerdr,
+        config: Config,
+    ) -> (tempfile::TempDir, ScratchApp<FakeHerdr>) {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths {
             config_dir: dir.path().join("config"),
@@ -1223,7 +1314,7 @@ mod tests {
             config_file: dir.path().join("config/config.toml"),
             registry_file: dir.path().join("state/registry.json"),
         };
-        let app = ScratchApp::new(Config::default(), Registry::default(), paths, fake);
+        let app = ScratchApp::new(config, Registry::default(), paths, fake);
         (dir, app)
     }
 
@@ -1451,5 +1542,143 @@ mod tests {
         assert_eq!(size.width.as_arg(), "80%");
         assert_eq!(size.height.as_arg(), "80%");
         assert!(calls.borrow().contains(&format!("show:{key}:80%x80%")));
+    }
+
+    #[test]
+    fn shell_quote_single_quotes_and_escapes_embedded_quotes() {
+        assert_eq!(shell_quote("/repo"), "'/repo'");
+        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
+    fn bare_shell_detects_command_scratchpads() {
+        let mut config = Config::default();
+        let bare_record = ScratchpadRecord {
+            name: "scratch".to_string(),
+            scope: ScopeRecord {
+                kind: "workspace".to_string(),
+                key: "w1".to_string(),
+            },
+            profile: "default".to_string(),
+            status: LifecycleStatus::Available,
+            launch_command: None,
+            handle: None,
+            cwd: None,
+            created_at: now_rfc3339(),
+            last_shown_at: now_rfc3339(),
+            last_hidden_at: None,
+            previous_focus: None,
+        };
+        assert!(bare_shell(&config, &bare_record));
+
+        config.profiles.insert(
+            "lazygit".to_string(),
+            ProfileConfig {
+                command: vec!["lazygit".into()],
+                cwd: CwdMode::Context,
+                env: Default::default(),
+            },
+        );
+        let lazygit_record = ScratchpadRecord {
+            profile: "lazygit".to_string(),
+            launch_command: None,
+            ..bare_record.clone()
+        };
+        assert!(!bare_shell(&config, &lazygit_record));
+
+        let one_shot = ScratchpadRecord {
+            profile: "default".to_string(),
+            launch_command: Some(vec!["lazygit".into()]),
+            ..bare_record.clone()
+        };
+        assert!(!bare_shell(&config, &one_shot));
+        let empty_override = ScratchpadRecord {
+            launch_command: Some(vec![]),
+            ..bare_record
+        };
+        assert!(bare_shell(&config, &empty_override));
+    }
+
+    #[test]
+    fn toggle_syncs_bare_popup_to_host_cwd_after_show() {
+        let fake = FakeHerdr {
+            backing_cwd: Some("/elsewhere".to_string()),
+            ..FakeHerdr::default()
+        };
+        let calls = fake.calls.clone();
+        let (_dir, mut app) = app_with_fake(fake);
+
+        app.toggle(None, None).unwrap();
+
+        let key = app.registry.scratchpads.keys().next().unwrap().clone();
+        assert!(calls.borrow().contains(&format!("show:{key}")));
+        assert!(calls.borrow().contains(&"run:cd '/repo'".to_string()));
+        assert_eq!(
+            app.registry.scratchpads.get(&key).unwrap().cwd.as_deref(),
+            Some("/repo")
+        );
+    }
+
+    #[test]
+    fn change_path_skips_sync_when_backing_cwd_already_matches() {
+        let fake = FakeHerdr::default();
+        let calls = fake.calls.clone();
+        let (_dir, mut app) = app_with_fake(fake);
+
+        app.toggle(None, None).unwrap();
+
+        assert!(!calls.borrow().iter().any(|call| call.starts_with("run:")));
+    }
+
+    #[test]
+    fn change_path_disabled_never_syncs() {
+        let mut config = Config::default();
+        config.behavior.change_path = false;
+        let fake = FakeHerdr {
+            backing_cwd: Some("/elsewhere".to_string()),
+            ..FakeHerdr::default()
+        };
+        let calls = fake.calls.clone();
+        let (_dir, mut app) = app_with_config(fake, config);
+
+        app.toggle(None, None).unwrap();
+
+        assert!(!calls.borrow().iter().any(|call| call.starts_with("run:")));
+    }
+
+    #[test]
+    fn change_path_skips_command_scratchpads() {
+        let mut config = Config::default();
+        config.profiles.insert(
+            "lazygit".to_string(),
+            ProfileConfig {
+                command: vec!["lazygit".into()],
+                cwd: CwdMode::Context,
+                env: Default::default(),
+            },
+        );
+        config.scratchpads.insert(
+            "git".to_string(),
+            ScratchpadConfig {
+                profile: "lazygit".to_string(),
+                scope: None,
+            },
+        );
+        let fake = FakeHerdr {
+            backing_cwd: Some("/elsewhere".to_string()),
+            ..FakeHerdr::default()
+        };
+        let calls = fake.calls.clone();
+        let (_dir, mut app) = app_with_config(fake, config);
+
+        app.toggle(Some("git"), None).unwrap();
+
+        assert!(!calls.borrow().iter().any(|call| call.starts_with("run:")));
+        let key = app.registry.scratchpads.keys().next().unwrap().clone();
+        assert_eq!(
+            app.registry.scratchpads.get(&key).unwrap().cwd.as_deref(),
+            Some("/repo")
+        );
     }
 }
