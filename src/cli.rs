@@ -39,6 +39,8 @@ pub enum Command {
     Fullscreen(NameArg),
     /// Reset a popup scratchpad to its configured size.
     Reset(NameArg),
+    /// Write recommended Herdr keybindings for the scratchpad actions.
+    Setup,
     /// Validate Herdr Scratch configuration and runtime connectivity.
     Doctor(JsonArg),
     /// Print config paths.
@@ -224,6 +226,12 @@ mod tests {
     fn parses_guide() {
         let cli = Cli::parse_from(["herdr-scratch", "guide"]);
         assert!(matches!(cli.command, Command::Guide));
+    }
+
+    #[test]
+    fn parses_setup_without_arguments() {
+        let cli = Cli::parse_from(["herdr-scratch", "setup"]);
+        assert!(matches!(cli.command, Command::Setup));
     }
 
     #[test]

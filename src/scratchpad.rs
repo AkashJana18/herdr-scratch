@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     path::PathBuf,
     process::Command,
 };
@@ -83,6 +83,7 @@ impl<H: Herdr> ScratchApp<H> {
             cli::Command::Resize(args) => self.resize(args.direction, args.name.as_deref()),
             cli::Command::Fullscreen(args) => self.fullscreen(args.name.as_deref()),
             cli::Command::Reset(args) => self.reset(args.name.as_deref()),
+            cli::Command::Setup => self.setup(),
             cli::Command::Doctor(args) => Ok(Output::Doctor {
                 report: self.doctor(),
                 json: args.json,
@@ -730,6 +731,20 @@ impl<H: Herdr> ScratchApp<H> {
         self.store.save(&self.registry)
     }
 
+    fn setup(&mut self) -> anyhow::Result<Output> {
+        let path = herdr_config_path();
+        let (added, skipped) = write_keybindings(&path)?;
+        if added == 0 {
+            return Ok(Output::Text(
+                "keybindings are already configured for herdr-scratch".to_string(),
+            ));
+        }
+        Ok(Output::Text(format!(
+            "wrote {added} recommended keybinding(s) to {}\n({skipped} already configured)\nreload Herdr with: herdr server reload-config",
+            path.display()
+        )))
+    }
+
     fn config_command(&mut self, args: cli::ConfigArgs) -> anyhow::Result<Output> {
         match args.command {
             cli::ConfigSubcommand::Path => {
@@ -859,6 +874,9 @@ Recommended keybinding (~/.config/herdr/config.toml):
    description = "toggle scratchpad"
 
 Then run: herdr server reload-config
+
+Or let the plugin write the recommended bindings:
+   herdr-scratch setup
 
 Diagnostics: herdr plugin action invoke doctor --plugin herdr.scratch
 Docs: https://github.com/AkashJana18/herdr-scratch
@@ -1071,6 +1089,131 @@ fn shell_quote(path: &str) -> String {
     }
     quoted.push('\'');
     quoted
+}
+
+/// Recommended Herdr keybindings written by `setup`: (key, action, description).
+const RECOMMENDED_KEYS: &[(&str, &str, &str)] = &[
+    ("prefix+p", "herdr.scratch.toggle", "toggle scratchpad"),
+    ("prefix+shift+p", "herdr.scratch.list", "list scratchpads"),
+    (
+        "prefix+g",
+        "herdr.scratch.lazygit",
+        "toggle lazygit scratchpad",
+    ),
+    ("prefix+n", "herdr.scratch.notes", "toggle notes scratchpad"),
+    ("prefix+=", "herdr.scratch.size-up", "grow popup scratchpad"),
+    (
+        "prefix+-",
+        "herdr.scratch.size-down",
+        "shrink popup scratchpad",
+    ),
+    (
+        "prefix+f",
+        "herdr.scratch.fullscreen",
+        "toggle popup fullscreen",
+    ),
+    (
+        "prefix+r",
+        "herdr.scratch.reset",
+        "reset popup scratchpad size",
+    ),
+];
+
+fn herdr_config_path() -> PathBuf {
+    if let Ok(path) = std::env::var("HERDR_CONFIG_FILE")
+        && !path.is_empty()
+    {
+        return PathBuf::from(path);
+    }
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME")
+        && !xdg.is_empty()
+    {
+        return PathBuf::from(xdg).join("herdr/config.toml");
+    }
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".config/herdr/config.toml")
+}
+
+/// Bindings already present in the Herdr config as `herdr.scratch.*` actions.
+fn bound_actions(value: &toml::Value) -> HashSet<String> {
+    value
+        .get("keys")
+        .and_then(|keys| keys.get("command"))
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("command").and_then(toml::Value::as_str))
+        .filter(|command| command.starts_with("herdr.scratch."))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Keys already bound to any action, so `setup` never steals a user's keys.
+fn taken_keys(value: &toml::Value) -> HashSet<String> {
+    value
+        .get("keys")
+        .and_then(|keys| keys.get("command"))
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("key").and_then(toml::Value::as_str))
+        .map(str::to_string)
+        .collect()
+}
+
+fn recommended_block(bindings: &[(&str, &str, &str)]) -> String {
+    let mut out = String::new();
+    out.push_str("# Added by herdr-scratch setup\n");
+    for (key, action, description) in bindings {
+        out.push_str("[[keys.command]]\n");
+        out.push_str(&format!("key = {key:?}\n"));
+        out.push_str("type = \"plugin_action\"\n");
+        out.push_str(&format!("command = {action:?}\n"));
+        out.push_str(&format!("description = {description:?}\n"));
+    }
+    out
+}
+
+/// Idempotently append the recommended `[[keys.command]]` bindings to a Herdr
+/// config file. Returns the number added and the number skipped.
+fn write_keybindings(path: &std::path::Path) -> anyhow::Result<(usize, usize)> {
+    let exists = path.exists();
+    let content = if exists {
+        std::fs::read_to_string(path)?
+    } else {
+        String::new()
+    };
+    let value: toml::Value = if content.trim().is_empty() {
+        toml::Value::Table(Default::default())
+    } else {
+        toml::from_str(&content).map_err(|err| {
+            anyhow::anyhow!("could not parse {path}: {err}", path = path.display())
+        })?
+    };
+    let actions = bound_actions(&value);
+    let keys = taken_keys(&value);
+    let added: Vec<_> = RECOMMENDED_KEYS
+        .iter()
+        .copied()
+        .filter(|(key, action, _)| !keys.contains(*key) && !actions.contains(*action))
+        .collect();
+    let skipped = RECOMMENDED_KEYS.len() - added.len();
+    if added.is_empty() {
+        return Ok((0, skipped));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut block = recommended_block(&added);
+    if !content.is_empty() {
+        if !content.ends_with('\n') {
+            block.insert(0, '\n');
+        }
+        block.insert(0, '\n');
+    }
+    std::fs::write(path, format!("{content}{block}"))?;
+    Ok((added.len(), skipped))
 }
 
 fn popup_size_json(size: &PopupSize) -> serde_json::Value {
@@ -1679,6 +1822,92 @@ mod tests {
         assert_eq!(
             app.registry.scratchpads.get(&key).unwrap().cwd.as_deref(),
             Some("/repo")
+        );
+    }
+
+    #[test]
+    fn setup_writes_recommended_keybindings_idempotently() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("herdr/config.toml");
+
+        let (added, skipped) = write_keybindings(&path).unwrap();
+        assert_eq!(added, RECOMMENDED_KEYS.len());
+        assert_eq!(skipped, 0);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        for (key, action, description) in RECOMMENDED_KEYS {
+            assert!(content.contains(&format!("key = {key:?}")));
+            assert!(content.contains(&format!("command = {action:?}")));
+            assert!(content.contains(&format!("description = {description:?}")));
+        }
+
+        let (added_again, skipped_again) = write_keybindings(&path).unwrap();
+        assert_eq!(added_again, 0);
+        assert_eq!(skipped_again, RECOMMENDED_KEYS.len());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+    }
+
+    #[test]
+    fn setup_preserves_config_and_skips_conflicting_bindings() {
+        let dir = tempfile::tempdir().unwrap();
+        let herdr_dir = dir.path().join("herdr");
+        std::fs::create_dir_all(&herdr_dir).unwrap();
+        let path = herdr_dir.join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+# existing user config
+[[keys.command]]
+key = "prefix+p"
+type = "plugin_action"
+command = "herdr.scratch.toggle"
+description = "mine"
+
+[[keys.command]]
+key = "prefix+z"
+type = "builtin"
+command = "unrelated"
+"#,
+        )
+        .unwrap();
+
+        let (added, skipped) = write_keybindings(&path).unwrap();
+        assert_eq!(added, RECOMMENDED_KEYS.len() - 1);
+        assert_eq!(skipped, 1);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.starts_with("\n# existing user config"));
+        assert!(content.contains("# Added by herdr-scratch setup"));
+        assert_eq!(content.matches("key = \"prefix+p\"").count(), 1);
+    }
+
+    #[test]
+    fn setup_appends_cleanly_to_a_file_without_a_trailing_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let herdr_dir = dir.path().join("herdr");
+        std::fs::create_dir_all(&herdr_dir).unwrap();
+        let path = herdr_dir.join("config.toml");
+        std::fs::write(&path, "[keys]").unwrap();
+
+        let (added, _) = write_keybindings(&path).unwrap();
+        assert_eq!(added, RECOMMENDED_KEYS.len());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.starts_with("[keys]\n"));
+        assert!(content.contains("# Added by herdr-scratch setup"));
+    }
+
+    #[test]
+    fn setup_rejects_malformed_config_without_touching_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let herdr_dir = dir.path().join("herdr");
+        std::fs::create_dir_all(&herdr_dir).unwrap();
+        let path = herdr_dir.join("config.toml");
+        std::fs::write(&path, "not a valid toml [[").unwrap();
+
+        assert!(write_keybindings(&path).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "not a valid toml [["
         );
     }
 }

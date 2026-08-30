@@ -15,6 +15,7 @@ herdr-scratch close [name]
 herdr-scratch resize <up|down> [name]
 herdr-scratch fullscreen [name]
 herdr-scratch reset [name]
+herdr-scratch setup
 herdr-scratch list [--json]
 herdr-scratch status [name] [--json]
 herdr-scratch rename <old> <new>
@@ -156,6 +157,14 @@ or CLI commands, not either internal entrypoint.
 
 ## Recommended Keybindings
 
+The plugin does not edit Herdr keybindings automatically, but `setup` writes
+them for you. `herdr-scratch setup` appends the bindings below to the Herdr
+config (from `HERDR_CONFIG_FILE`, `$XDG_CONFIG_HOME/herdr/config.toml`, or
+`~/.config/herdr/config.toml`). It is idempotent: actions already bound are
+skipped, keys already in use are left alone, and existing content and comments
+are preserved. A malformed config file is reported without being modified; run
+`herdr server reload-config` afterwards.
+
 ```toml
 [[keys.command]]
 key = "prefix+p"
@@ -206,4 +215,9 @@ command = "herdr.scratch.reset"
 description = "reset popup scratchpad size"
 ```
 
-The plugin does not edit Herdr keybindings automatically.
+Equivalent CLI writing for the same bindings:
+
+```bash
+herdr-scratch setup
+herdr server reload-config
+```

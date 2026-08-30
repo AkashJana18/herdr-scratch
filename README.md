@@ -193,6 +193,7 @@ herdr-scratch close [name]
 herdr-scratch resize <up|down> [name]
 herdr-scratch fullscreen [name]
 herdr-scratch reset [name]
+herdr-scratch setup
 herdr-scratch list [--json]
 herdr-scratch status [name] [--json]
 herdr-scratch rename <old> <new>
@@ -249,6 +250,15 @@ Send a command to an existing scratchpad:
 herdr-scratch run notes "git status"
 ```
 
+One-time onboarding: write the recommended Herdr keybindings for the plugin
+actions. The write is idempotent, never overwrites the config, and skips any
+key that is already in use:
+
+```bash
+herdr-scratch setup
+herdr server reload-config
+```
+
 Resize a popup scratchpad (step from `behavior.resize_step`), toggle it
 fullscreen, or reset it to its configured size:
 
@@ -276,7 +286,8 @@ herdr-scratch status notes
 herdr-scratch doctor
 ```
 
-Recommended Herdr keybindings:
+Recommended Herdr keybindings (also written automatically by
+`herdr-scratch setup`, which never steals keys you have already bound):
 
 ```toml
 [[keys.command]]
