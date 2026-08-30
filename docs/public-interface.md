@@ -186,7 +186,7 @@ command = "herdr.scratch.list"
 description = "list scratchpads"
 
 [[keys.command]]
-key = "prefix+g"
+key = "prefix+shift+g"
 type = "plugin_action"
 command = "herdr.scratch.lazygit"
 description = "toggle lazygit scratchpad"

@@ -1152,7 +1152,7 @@ const RECOMMENDED_KEYS: &[(&str, &str, &str)] = &[
     ("prefix+p", "herdr.scratch.toggle", "toggle scratchpad"),
     ("prefix+shift+p", "herdr.scratch.list", "list scratchpads"),
     (
-        "prefix+g",
+        "prefix+shift+g",
         "herdr.scratch.lazygit",
         "toggle lazygit scratchpad",
     ),
@@ -1206,12 +1206,14 @@ fn bound_actions(value: &toml::Value) -> HashSet<String> {
 }
 
 /// Keys already bound to any action, so `setup` never steals a user's keys.
+/// Every `[[keys.*]]` chord table counts (command, goto, session, tab, ...).
 fn taken_keys(value: &toml::Value) -> HashSet<String> {
     value
         .get("keys")
-        .and_then(|keys| keys.get("command"))
-        .and_then(toml::Value::as_array)
+        .and_then(toml::Value::as_table)
         .into_iter()
+        .flat_map(|keys| keys.values())
+        .filter_map(toml::Value::as_array)
         .flatten()
         .filter_map(|entry| entry.get("key").and_then(toml::Value::as_str))
         .map(str::to_string)
@@ -1962,6 +1964,35 @@ command = "unrelated"
     }
 
     #[test]
+    fn setup_reserves_keys_used_by_goto_and_other_key_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let herdr_dir = dir.path().join("herdr");
+        std::fs::create_dir_all(&herdr_dir).unwrap();
+        let path = herdr_dir.join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+# user uses prefix+shift+g for the goto overlay
+[[keys.goto]]
+key = "prefix+shift+g"
+
+[[keys.session]]
+key = "prefix+n"
+command = "attach"
+"#,
+        )
+        .unwrap();
+
+        let (added, skipped) = write_keybindings(&path).unwrap();
+        assert_eq!(added, RECOMMENDED_KEYS.len() - 2);
+        assert_eq!(skipped, 2);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content.matches("key = \"prefix+shift+g\"").count(), 1);
+        assert_eq!(content.matches("key = \"prefix+n\"").count(), 1);
+    }
+
+    #[test]
     fn setup_appends_cleanly_to_a_file_without_a_trailing_newline() {
         let dir = tempfile::tempdir().unwrap();
         let herdr_dir = dir.path().join("herdr");
@@ -2027,8 +2058,16 @@ command = "unrelated"
     fn doctor_reports_server_and_keybinding_status() {
         let fake = FakeHerdr::default();
         let (_dir, app) = app_with_fake(fake);
-
+        let config_dir = tempfile::tempdir().unwrap();
+        let config_path = config_dir.path().join("config.toml");
+        std::fs::write(&config_path, "").unwrap();
+        unsafe {
+            std::env::set_var("HERDR_CONFIG_FILE", &config_path);
+        }
         let report = app.doctor();
+        unsafe {
+            std::env::remove_var("HERDR_CONFIG_FILE");
+        }
 
         assert!(report.server_ok);
         assert_eq!(report.keybinding_missing, RECOMMENDED_KEYS.len());
