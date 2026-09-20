@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    config::{PopupConfig, PopupSize, ScratchpadPlacement, SplitDirection},
+    config::{ScratchpadPlacement, SplitDirection},
     registry::{FocusSnapshot, RuntimeHandle},
 };
 
@@ -22,7 +22,7 @@ use std::{
 
 pub const PLUGIN_ID: &str = "herdr.scratch";
 const RUNTIME_ENTRYPOINT: &str = "scratch";
-const POPUP_ENTRYPOINT: &str = "popup";
+const VIEWER_ENTRYPOINT: &str = "viewer";
 const GUIDE_ENTRYPOINT: &str = "guide";
 
 pub trait Herdr {
@@ -37,10 +37,8 @@ pub trait Herdr {
         &self,
         handle: &RuntimeHandle,
         registry_key: &str,
-        popup: &PopupConfig,
-        size: Option<&PopupSize>,
-    ) -> Result<(), HerdrError>;
-    fn hide_handle(&self, handle: &RuntimeHandle) -> Result<(), HerdrError>;
+    ) -> Result<Option<PaneInfo>, HerdrError>;
+    fn focus_pane(&self, pane_id: &str) -> Result<(), HerdrError>;
     fn focus_previous(&self, previous: &FocusSnapshot) -> Result<(), HerdrError>;
     fn open_scratchpad(&self, request: OpenScratchpadRequest) -> Result<RuntimeHandle, HerdrError>;
     fn rename_handle(&self, handle: &RuntimeHandle, title: &str) -> Result<(), HerdrError>;
@@ -351,9 +349,7 @@ impl Herdr for HerdrCli {
         &self,
         handle: &RuntimeHandle,
         registry_key: &str,
-        popup: &PopupConfig,
-        size: Option<&PopupSize>,
-    ) -> Result<(), HerdrError> {
+    ) -> Result<Option<PaneInfo>, HerdrError> {
         if handle.is_popup() {
             let session = handle
                 .session
@@ -364,10 +360,6 @@ impl Herdr for HerdrCli {
                 .terminal_id
                 .as_deref()
                 .ok_or(HerdrError::MissingHandle("terminal_id"))?;
-            let (width, height) = match size {
-                Some(size) => size.to_arg_pairs(),
-                None => (popup.width.as_arg(), popup.height.as_arg()),
-            };
             let args = vec![
                 "plugin".to_string(),
                 "pane".to_string(),
@@ -375,13 +367,9 @@ impl Herdr for HerdrCli {
                 "--plugin".to_string(),
                 PLUGIN_ID.to_string(),
                 "--entrypoint".to_string(),
-                POPUP_ENTRYPOINT.to_string(),
+                VIEWER_ENTRYPOINT.to_string(),
                 "--placement".to_string(),
-                "popup".to_string(),
-                "--width".to_string(),
-                width,
-                "--height".to_string(),
-                height,
+                "overlay".to_string(),
                 "--env".to_string(),
                 format!("HERDR_SCRATCH_BACKING_SESSION={session}"),
                 "--env".to_string(),
@@ -389,7 +377,16 @@ impl Herdr for HerdrCli {
                 "--env".to_string(),
                 format!("HERDR_SCRATCH_REGISTRY_KEY={registry_key}"),
             ];
-            return self.run_ok(&args);
+            let value = self.run(&args)?;
+            let pane = parse_plugin_pane_opened(value)?;
+            return Ok(Some(PaneInfo {
+                pane_id: pane.pane_id,
+                terminal_id: pane.terminal_id,
+                workspace_id: pane.workspace_id,
+                tab_id: pane.tab_id,
+                focused: true,
+                cwd: pane.cwd,
+            }));
         }
 
         if let Some(focus_token) = handle.focus_token() {
@@ -403,39 +400,11 @@ impl Herdr for HerdrCli {
                 pane_id.into(),
             ])?;
         }
-        Ok(())
+        Ok(None)
     }
 
-    fn hide_handle(&self, handle: &RuntimeHandle) -> Result<(), HerdrError> {
-        if !handle.is_popup() {
-            return Ok(());
-        }
-        #[cfg(unix)]
-        {
-            let socket_path = std::env::var_os("HERDR_SOCKET_PATH")
-                .map(PathBuf::from)
-                .ok_or_else(|| {
-                    HerdrError::Unsupported(
-                        "HERDR_SOCKET_PATH is not set; cannot close the active popup".to_string(),
-                    )
-                })?;
-            let response = socket_request(
-                &socket_path,
-                &serde_json::json!({
-                    "id": "herdr-scratch:popup-close",
-                    "method": "popup.close",
-                    "params": {},
-                }),
-            )?;
-            parse_result(response)?;
-            Ok(())
-        }
-        #[cfg(not(unix))]
-        {
-            Err(HerdrError::Unsupported(
-                "popup close is only implemented for Unix sockets".to_string(),
-            ))
-        }
+    fn focus_pane(&self, pane_id: &str) -> Result<(), HerdrError> {
+        self.focus_pane_by_id(pane_id)
     }
 
     fn focus_previous(&self, previous: &FocusSnapshot) -> Result<(), HerdrError> {
@@ -818,14 +787,7 @@ esac
             session: Some("herdr-scratch".to_string()),
             opaque: BTreeMap::new(),
         };
-        herdr
-            .show_handle(
-                &handle,
-                "workspace:w1:scratch",
-                &PopupConfig::default(),
-                None,
-            )
-            .unwrap();
+        herdr.show_handle(&handle, "workspace:w1:scratch").unwrap();
 
         assert!(state.join("server-up").exists());
         unsafe { std::env::remove_var("HERDR_FAKE_STATE") };

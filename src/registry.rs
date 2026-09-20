@@ -40,55 +40,6 @@ impl RegistryStore {
         file.lock_exclusive()?;
         Ok(RegistryLock { file })
     }
-
-    pub fn viewer_lease(&self, key: &str) -> anyhow::Result<ViewerLease> {
-        let path = self.viewer_lease_path(key);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(path)?;
-        file.lock_exclusive()?;
-        Ok(ViewerLease { file })
-    }
-
-    pub fn viewer_is_active(&self, key: &str) -> bool {
-        let path = self.viewer_lease_path(key);
-        let Ok(file) = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(path)
-        else {
-            return false;
-        };
-        match file.try_lock_exclusive() {
-            Ok(()) => {
-                let _ = file.unlock();
-                false
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => true,
-            Err(_) => false,
-        }
-    }
-
-    fn viewer_lease_path(&self, key: &str) -> PathBuf {
-        let encoded = key
-            .as_bytes()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        self.path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("viewers")
-            .join(format!("{encoded}.lock"))
-    }
 }
 
 pub struct RegistryLock {
@@ -96,16 +47,6 @@ pub struct RegistryLock {
 }
 
 impl Drop for RegistryLock {
-    fn drop(&mut self) {
-        let _ = self.file.unlock();
-    }
-}
-
-pub struct ViewerLease {
-    file: std::fs::File,
-}
-
-impl Drop for ViewerLease {
     fn drop(&mut self) {
         let _ = self.file.unlock();
     }
@@ -186,6 +127,19 @@ pub struct ScratchpadRecord {
     pub last_hidden_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_focus: Option<FocusSnapshot>,
+    /// The overlay viewer pane showing this scratchpad (present while open).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewer: Option<ViewerInfo>,
+}
+
+/// Describes the overlay pane that is showing a scratchpad's backing terminal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewerInfo {
+    pub pane_id: String,
+    pub workspace_id: String,
+    pub tab_id: String,
+    pub terminal_id: String,
+    pub focus_token: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -308,6 +262,7 @@ mod tests {
                 last_shown_at: now_rfc3339(),
                 last_hidden_at: None,
                 previous_focus: None,
+                viewer: None,
             },
         );
         registry.save(&path).unwrap();
@@ -337,15 +292,5 @@ mod tests {
         assert_eq!(loaded.version, REGISTRY_VERSION);
         assert_eq!(handle.kind, "herdr");
         assert_eq!(handle.pane_id.as_deref(), Some("w1:p2"));
-    }
-
-    #[test]
-    fn viewer_lease_reports_active_until_dropped() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = RegistryStore::new(dir.path().join("registry.json"));
-        let lease = store.viewer_lease("workspace:w1:scratch").unwrap();
-        assert!(store.viewer_is_active("workspace:w1:scratch"));
-        drop(lease);
-        assert!(!store.viewer_is_active("workspace:w1:scratch"));
     }
 }

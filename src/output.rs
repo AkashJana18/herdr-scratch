@@ -80,7 +80,11 @@ fn format_doctor(report: &DoctorReport) -> String {
         format!("state dir: {}", report.state_dir),
         format!("state: {}", report.state_path),
         format!("scratchpads: {}", report.scratchpad_count),
+        format!("notes: {}", report.notes_source),
     ];
+    if let Some(file) = report.notes_file.as_deref() {
+        lines.push(format!("daily note: {file}"));
+    }
     if report.keybinding_missing > 0 {
         lines.push(format!(
             "keybindings: {} not configured (run `herdr-scratch setup`)",
@@ -108,6 +112,8 @@ mod tests {
             state_path: "/state/registry.json".to_string(),
             scratchpad_count: 0,
             keybinding_missing: 0,
+            notes_source: "fallback".to_string(),
+            notes_file: None,
             issues: Vec::new(),
         };
 

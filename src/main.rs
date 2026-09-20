@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod herdr;
+mod obsidian;
 mod output;
 mod registry;
 mod scratchpad;

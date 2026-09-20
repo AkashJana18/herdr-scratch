@@ -17,6 +17,8 @@ pub enum Command {
     Toggle(OpenArgs),
     /// Create or show a scratchpad.
     Open(OpenArgs),
+    /// Open today's daily note (Obsidian vault with auto-detect, else local file).
+    Daily(DailyArgs),
     /// Focus an existing scratchpad.
     Focus(NameArg),
     /// Leave a scratchpad without destroying it when possible.
@@ -61,6 +63,19 @@ pub enum Command {
 #[derive(Debug, Args)]
 pub struct NameArg {
     pub name: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct DailyArgs {
+    /// Override the vault path for this invocation only.
+    #[arg(long)]
+    pub vault: Option<String>,
+    /// Print the resolved daily-note path instead of opening it.
+    #[arg(long)]
+    pub print_path: bool,
+    /// Open the note for a specific date (YYYY-MM-DD), e.g. for backfill.
+    #[arg(long)]
+    pub date: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -220,6 +235,25 @@ mod tests {
         assert_eq!(args.name, "lazygit");
         assert_eq!(args.scope.as_deref(), Some("cwd"));
         assert_eq!(args.command, vec!["lazygit"]);
+    }
+
+    #[test]
+    fn parses_daily_flags() {
+        let cli = Cli::parse_from([
+            "herdr-scratch",
+            "daily",
+            "--vault",
+            "/tmp/vault",
+            "--print-path",
+            "--date",
+            "2026-09-19",
+        ]);
+        let Command::Daily(args) = cli.command else {
+            panic!("expected daily command");
+        };
+        assert_eq!(args.vault.as_deref(), Some("/tmp/vault"));
+        assert!(args.print_path);
+        assert_eq!(args.date.as_deref(), Some("2026-09-19"));
     }
 
     #[test]

@@ -40,6 +40,7 @@ pub struct Config {
     pub scope: ScopeConfig,
     pub profiles: BTreeMap<String, ProfileConfig>,
     pub scratchpads: BTreeMap<String, ScratchpadConfig>,
+    pub notes: NotesConfig,
 }
 
 impl Default for Config {
@@ -59,6 +60,7 @@ impl Default for Config {
             scope: ScopeConfig::default(),
             profiles,
             scratchpads,
+            notes: NotesConfig::default(),
         }
     }
 }
@@ -102,6 +104,65 @@ impl Config {
             anyhow::bail!("runtime.backing_session must not be empty");
         }
         Ok(())
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NotesConfig {
+    /// Explicit vault path. Wins over auto-detection when set.
+    #[serde(default)]
+    pub vault_path: Option<String>,
+    /// Parse Obsidian's `obsidian.json` registry when no explicit vault is set.
+    #[serde(default = "default_true")]
+    pub vault_auto: bool,
+    /// Override path to `obsidian.json` (portable installs, Flatpak/Snap, tests).
+    #[serde(default)]
+    pub obsidian_config: Option<String>,
+    /// Force daily-note subdir inside the vault. Empty = read from
+    /// `.obsidian/daily-notes.json`, then vault root.
+    #[serde(default)]
+    pub daily_subdir: Option<String>,
+    /// Force Moment.js daily-note format. Empty = read from vault config.
+    #[serde(default)]
+    pub daily_format: Option<String>,
+    /// Force template file path. Empty = read from vault config.
+    #[serde(default)]
+    pub template_path: Option<String>,
+    /// Directory for local daily files when no vault resolves.
+    /// Empty = `<state_dir>/daily`.
+    #[serde(default)]
+    pub fallback_dir: Option<String>,
+    /// Editor binary. Empty = `$VISUAL`/`$EDITOR`, then `vim`.
+    #[serde(default)]
+    pub editor: Option<String>,
+}
+
+impl Default for NotesConfig {
+    fn default() -> Self {
+        Self {
+            vault_path: None,
+            vault_auto: true,
+            obsidian_config: None,
+            daily_subdir: None,
+            daily_format: None,
+            template_path: None,
+            fallback_dir: None,
+            editor: None,
+        }
+    }
+}
+
+impl NotesConfig {
+    pub fn vault_path_set(&self) -> Option<&str> {
+        self.vault_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
     }
 }
 
@@ -186,7 +247,7 @@ pub struct UiConfig {
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
-            title_template: "scratch:{name}".to_string(),
+            title_template: "Scratchpad:{name}".to_string(),
             status_notifications: NotificationMode::Errors,
             popup: PopupConfig::default(),
         }
@@ -209,27 +270,6 @@ impl Default for PopupConfig {
     }
 }
 
-impl PopupConfig {
-    pub fn size(&self) -> PopupSize {
-        PopupSize {
-            width: self.width.clone(),
-            height: self.height.clone(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PopupSize {
-    pub width: PopupDimension,
-    pub height: PopupDimension,
-}
-
-impl PopupSize {
-    pub fn to_arg_pairs(&self) -> (String, String) {
-        (self.width.as_arg(), self.height.as_arg())
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum PopupDimension {
@@ -237,6 +277,7 @@ pub enum PopupDimension {
     Percent(String),
 }
 
+#[allow(dead_code)] // sizing is deprecated; helpers kept for config round-trips
 impl PopupDimension {
     pub fn as_arg(&self) -> String {
         match self {
@@ -266,6 +307,8 @@ impl PopupDimension {
     /// Mixed units follow the dimension's own unit: a percentage step applies to
     /// a percentage dimension, and an absolute-cell step applies to a cell
     /// dimension. Results clamp to a sane outer popup range.
+    /// Apply a sizing step (legacy; sizing is deprecated for the overlay viewer).
+    #[allow(dead_code)] // kept for config round-trip tests
     pub fn apply_step(&self, step: &PopupDimension, up: bool) -> Self {
         match self {
             Self::Percent(_) => {
@@ -309,6 +352,7 @@ impl PopupDimension {
     }
 }
 
+#[allow(dead_code)] // sizing is deprecated; kept for config round-trip tests
 fn percent_points(value: &PopupDimension) -> Option<i32> {
     match value {
         PopupDimension::Percent(raw) => raw.strip_suffix('%')?.parse().ok(),
@@ -452,6 +496,36 @@ mod tests {
         assert_eq!(config.behavior.resize_step.as_arg(), "5%");
         assert_eq!(config.behavior.fullscreen_size.as_arg(), "100%");
         assert!(config.behavior.change_path);
+        assert_eq!(config.ui.title_template, "Scratchpad:{name}");
+        assert!(config.notes.vault_path.is_none());
+        assert!(config.notes.vault_auto);
+        assert!(config.notes.editor.is_none());
+    }
+
+    #[test]
+    fn parses_notes_config_keys() {
+        let config: Config = toml::from_str(
+            r#"
+version = 1
+
+[notes]
+vault_path = "/vault"
+vault_auto = false
+daily_subdir = "Daily"
+daily_format = "YYYY/MM/DD"
+template_path = "/vault/Tpl.md"
+fallback_dir = "/tmp/fallback"
+editor = "nvim"
+        "#,
+        )
+        .unwrap();
+        assert_eq!(config.notes.vault_path.as_deref(), Some("/vault"));
+        assert!(!config.notes.vault_auto);
+        assert_eq!(config.notes.daily_subdir.as_deref(), Some("Daily"));
+        assert_eq!(config.notes.daily_format.as_deref(), Some("YYYY/MM/DD"));
+        assert_eq!(config.notes.template_path.as_deref(), Some("/vault/Tpl.md"));
+        assert_eq!(config.notes.fallback_dir.as_deref(), Some("/tmp/fallback"));
+        assert_eq!(config.notes.editor.as_deref(), Some("nvim"));
     }
 
     #[test]
