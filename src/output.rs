@@ -87,12 +87,12 @@ fn format_doctor(report: &DoctorReport) -> String {
     }
     if report.keybinding_missing > 0 {
         lines.push(format!(
-            "keybindings: {} not configured (run `herdr-scratch setup`)",
+            "keybindings: {} not configured (add them from the README, then run `herdr server reload-config`)",
             report.keybinding_missing
         ));
     }
     lines.extend(report.issues.iter().map(|issue| format!("issue: {issue}")));
-    lines.push("next: herdr plugin action invoke guide --plugin herdr.scratch".to_string());
+    lines.push("next: herdr plugin action invoke toggle --plugin herdr.scratch".to_string());
     lines.join("\n")
 }
 
@@ -101,7 +101,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn human_doctor_output_points_to_the_guide() {
+    fn human_doctor_output_points_to_toggle() {
         let report = DoctorReport {
             herdr_available: true,
             herdr_version: Some("herdr 0.8.0".to_string()),
@@ -120,6 +120,6 @@ mod tests {
         let output = format_doctor(&report);
         assert!(output.contains("herdr: ok"));
         assert!(output.contains("server: ok"));
-        assert!(output.ends_with("next: herdr plugin action invoke guide --plugin herdr.scratch"));
+        assert!(output.ends_with("next: herdr plugin action invoke toggle --plugin herdr.scratch"));
     }
 }

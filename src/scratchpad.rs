@@ -82,14 +82,13 @@ impl<H: Herdr> ScratchApp<H> {
 
     pub fn handle(&mut self, command: cli::Command) -> anyhow::Result<Output> {
         match command {
-            cli::Command::Guide => self.guide(),
-            cli::Command::Daily(args) => self.daily(&args),
             cli::Command::Toggle(args) => {
                 self.toggle(args.name.as_deref(), command_override(args.command))
             }
             cli::Command::Open(args) => {
                 self.open(args.name.as_deref(), command_override(args.command))
             }
+            cli::Command::Daily(args) => self.daily(&args),
             cli::Command::Focus(args) => self.focus(args.name.as_deref()),
             cli::Command::Hide(args) => self.hide(args.name.as_deref()),
             cli::Command::Close(args) => self.close(args.name.as_deref()),
@@ -99,12 +98,7 @@ impl<H: Herdr> ScratchApp<H> {
             }),
             cli::Command::Status(args) => self.status(args.name.as_deref(), args.json),
             cli::Command::Rename(args) => self.rename(&args.old, &args.new),
-            cli::Command::Send(args) => self.send(&args.name, &args.text.join(" ")),
             cli::Command::Run(args) => self.run_in_scratchpad(&args.name, &args.command.join(" ")),
-            cli::Command::Resize(args) => self.resize(args.direction, args.name.as_deref()),
-            cli::Command::Fullscreen(args) => self.fullscreen(args.name.as_deref()),
-            cli::Command::Reset(args) => self.reset(args.name.as_deref()),
-            cli::Command::Setup => self.setup(),
             cli::Command::Doctor(args) => Ok(Output::Doctor {
                 report: self.doctor(),
                 json: args.json,
@@ -115,19 +109,7 @@ impl<H: Herdr> ScratchApp<H> {
             }) => Ok(Output::Text(self.paths.registry_file.display().to_string())),
             cli::Command::Session => anyhow::bail!("session must be handled before app startup"),
             cli::Command::Attach => anyhow::bail!("attach must be handled before app startup"),
-            cli::Command::GuidePane => {
-                anyhow::bail!("guide-pane must be handled before app startup")
-            }
         }
-    }
-
-    fn guide(&self) -> anyhow::Result<Output> {
-        self.herdr.open_guide().map_err(|err| {
-            anyhow::anyhow!(
-                "failed to open the Scratch guide popup: {err}. If another popup is open, detach it with ctrl+b q and try again"
-            )
-        })?;
-        Ok(Output::Text("opened Scratch quick start".to_string()))
     }
 
     fn daily(&mut self, args: &cli::DailyArgs) -> anyhow::Result<Output> {
@@ -501,17 +483,6 @@ impl<H: Herdr> ScratchApp<H> {
         )))
     }
 
-    fn send(&mut self, name: &str, text: &str) -> anyhow::Result<Output> {
-        let current = self.herdr.current_pane().ok();
-        let target = self.target(Some(name), current.as_ref())?;
-        let handle = self.live_handle(&target)?;
-        self.herdr.send_text(&handle, text)?;
-        Ok(Output::Text(format!(
-            "sent text to scratchpad `{}`",
-            target.name
-        )))
-    }
-
     fn run_in_scratchpad(&mut self, name: &str, command: &str) -> anyhow::Result<Output> {
         let current = self.herdr.current_pane().ok();
         let target = self.target(Some(name), current.as_ref())?;
@@ -521,31 +492,6 @@ impl<H: Herdr> ScratchApp<H> {
             "ran command in scratchpad `{}`",
             target.name
         )))
-    }
-
-    fn resize(
-        &mut self,
-        _direction: cli::ResizeDirection,
-        name: Option<&str>,
-    ) -> anyhow::Result<Output> {
-        let _ = name;
-        Ok(Output::Text(
-            "sizing no longer applies: the scratchpad viewer now uses the overlay surface, which always fills the pane (see `herdr-scratch guide`)".to_string(),
-        ))
-    }
-
-    fn fullscreen(&mut self, name: Option<&str>) -> anyhow::Result<Output> {
-        let _ = name;
-        Ok(Output::Text(
-            "fullscreen no longer applies: the scratchpad viewer now uses the overlay surface, which always fills the pane (see `herdr-scratch guide`)".to_string(),
-        ))
-    }
-
-    fn reset(&mut self, name: Option<&str>) -> anyhow::Result<Output> {
-        let _ = name;
-        Ok(Output::Text(
-            "sizing no longer applies: the scratchpad viewer now uses the overlay surface, which always fills the pane (see `herdr-scratch guide`)".to_string(),
-        ))
     }
 
     fn activate_or_open(
@@ -979,7 +925,7 @@ impl<H: Herdr> ScratchApp<H> {
                     0
                 } else {
                     issues.push(format!(
-                        "{} recommended keybinding(s) are not configured; run `herdr-scratch setup`",
+                        "{} recommended keybinding(s) are not configured; add them to the Herdr config (see README) and run `herdr server reload-config`",
                         pending.len()
                     ));
                     pending.len()
@@ -987,7 +933,7 @@ impl<H: Herdr> ScratchApp<H> {
             }
             Err(err) => {
                 issues.push(format!(
-                    "could not read the Herdr config for setup: {err:#}"
+                    "could not read the Herdr config for keybindings: {err:#}"
                 ));
                 0
             }
@@ -1044,20 +990,6 @@ impl<H: Herdr> ScratchApp<H> {
 
     fn save(&self) -> anyhow::Result<()> {
         self.store.save(&self.registry)
-    }
-
-    fn setup(&mut self) -> anyhow::Result<Output> {
-        let path = herdr_config_path();
-        let (added, skipped) = write_keybindings(&path)?;
-        if added == 0 {
-            return Ok(Output::Text(
-                "keybindings are already configured for herdr-scratch".to_string(),
-            ));
-        }
-        Ok(Output::Text(format!(
-            "wrote {added} recommended keybinding(s) to {}\n({skipped} already configured)\nreload Herdr with: herdr server reload-config",
-            path.display()
-        )))
     }
 
     fn config_command(&mut self, args: cli::ConfigArgs) -> anyhow::Result<Output> {
@@ -1155,48 +1087,6 @@ pub fn run_popup_attach(paths: Paths) -> anyhow::Result<()> {
         update_attach_status(&store, &key, LifecycleStatus::Closed, !live)?;
     }
     attach_result?;
-    Ok(())
-}
-
-const GUIDE_TEXT: &str = r#"
-Scratch is ready
-================
-
-1. Open or hide your persistent scratchpad:
-   herdr plugin action invoke toggle --plugin herdr.scratch
-
-2. The scratchpad viewer uses an overlay pane, so all Herdr keys
-   (including ctrl+b p for toggle) keep working while it is focused.
-
-3. Run the toggle action again to hide it.
-   The terminal keeps running in the background.
-
-Recommended keybinding (~/.config/herdr/config.toml):
-
-   [[keys.command]]
-   key = "prefix+p"
-   type = "plugin_action"
-   command = "herdr.scratch.toggle"
-   description = "toggle scratchpad"
-
-Then run: herdr server reload-config
-
-Or let the plugin write the recommended bindings:
-   herdr-scratch setup
-
-Diagnostics: herdr plugin action invoke doctor --plugin herdr.scratch
-Docs: https://github.com/AkashJana18/herdr-scratch
-
-Press Enter to close this guide. You can also press ctrl+b q.
-"#;
-
-pub fn run_guide_pane() -> anyhow::Result<()> {
-    use std::io::{self, Write};
-
-    print!("{GUIDE_TEXT}");
-    io::stdout().flush()?;
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
     Ok(())
 }
 
@@ -1397,7 +1287,8 @@ fn shell_quote(path: &str) -> String {
     quoted
 }
 
-/// Recommended Herdr keybindings written by `setup`: (key, action, description).
+/// Recommended Herdr keybindings (key, action, description), also listed in
+/// the README for manual config. `doctor` reports how many are missing.
 const RECOMMENDED_KEYS: &[(&str, &str, &str)] = &[
     ("prefix+p", "herdr.scratch.toggle", "toggle scratchpad"),
     ("prefix+shift+p", "herdr.scratch.list", "list scratchpads"),
@@ -1440,7 +1331,7 @@ fn bound_actions(value: &toml::Value) -> HashSet<String> {
         .collect()
 }
 
-/// Keys already bound to any action, so `setup` never steals a user's keys.
+/// Keys already bound to any action, so recommended keys never collide.
 /// Every `[[keys.*]]` chord table counts (command, goto, session, tab, ...).
 fn taken_keys(value: &toml::Value) -> HashSet<String> {
     value
@@ -1453,19 +1344,6 @@ fn taken_keys(value: &toml::Value) -> HashSet<String> {
         .filter_map(|entry| entry.get("key").and_then(toml::Value::as_str))
         .map(str::to_string)
         .collect()
-}
-
-fn recommended_block(bindings: &[(&str, &str, &str)]) -> String {
-    let mut out = String::new();
-    out.push_str("# Added by herdr-scratch setup\n");
-    for (key, action, description) in bindings {
-        out.push_str("[[keys.command]]\n");
-        out.push_str(&format!("key = {key:?}\n"));
-        out.push_str("type = \"plugin_action\"\n");
-        out.push_str(&format!("command = {action:?}\n"));
-        out.push_str(&format!("description = {description:?}\n"));
-    }
-    out
 }
 
 /// Recommended bindings from `RECOMMENDED_KEYS` that are NOT yet present in
@@ -1492,34 +1370,6 @@ fn pending_keybindings(
         .copied()
         .filter(|(key, action, _)| !keys.contains(*key) && !actions.contains(*action))
         .collect())
-}
-
-/// Idempotently append the recommended `[[keys.command]]` bindings to a Herdr
-/// config file. Returns the number added and the number skipped.
-fn write_keybindings(path: &std::path::Path) -> anyhow::Result<(usize, usize)> {
-    let pending = pending_keybindings(path)?;
-    let added = pending.len();
-    let skipped = RECOMMENDED_KEYS.len() - added;
-    if added == 0 {
-        return Ok((0, skipped));
-    }
-    let content = if path.exists() {
-        std::fs::read_to_string(path)?
-    } else {
-        String::new()
-    };
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut block = recommended_block(&pending);
-    if !content.is_empty() {
-        if !content.ends_with('\n') {
-            block.insert(0, '\n');
-        }
-        block.insert(0, '\n');
-    }
-    std::fs::write(path, format!("{content}{block}"))?;
-    Ok((added, skipped))
 }
 
 /// A minimal handle describing the overlay viewer pane, used to probe liveness.
@@ -1694,11 +1544,6 @@ mod tests {
             })
         }
 
-        fn open_guide(&self) -> Result<(), HerdrError> {
-            self.calls.borrow_mut().push("open:guide".to_string());
-            Ok(())
-        }
-
         fn tab_get(&self, tab_id: &str) -> Result<TabInfo, HerdrError> {
             Ok(TabInfo {
                 tab_id: tab_id.to_string(),
@@ -1796,11 +1641,6 @@ mod tests {
             Ok(())
         }
 
-        fn send_text(&self, _handle: &RuntimeHandle, text: &str) -> Result<(), HerdrError> {
-            self.calls.borrow_mut().push(format!("send:{text}"));
-            Ok(())
-        }
-
         fn run_command(&self, _handle: &RuntimeHandle, command: &str) -> Result<(), HerdrError> {
             self.calls.borrow_mut().push(format!("run:{command}"));
             Ok(())
@@ -1882,27 +1722,6 @@ mod tests {
         assert!(!herdr_supports_popup("herdr 0.7.3"));
         assert!(herdr_supports_popup("herdr 0.7.4"));
         assert!(herdr_supports_popup("herdr 0.8.0"));
-    }
-
-    #[test]
-    fn guide_opens_visible_popup() {
-        let fake = FakeHerdr::default();
-        let calls = fake.calls.clone();
-        let (_dir, mut app) = app_with_fake(fake);
-
-        let output = app.handle(cli::Command::Guide).unwrap();
-
-        assert!(matches!(output, Output::Text(text) if text == "opened Scratch quick start"));
-        assert_eq!(calls.borrow().as_slice(), ["open:guide"]);
-    }
-
-    #[test]
-    fn guide_covers_the_first_run_workflow() {
-        assert!(GUIDE_TEXT.contains("action invoke toggle"));
-        assert!(GUIDE_TEXT.contains("ctrl+b q"));
-        assert!(GUIDE_TEXT.contains("herdr.scratch.toggle"));
-        assert!(GUIDE_TEXT.contains("server reload-config"));
-        assert!(GUIDE_TEXT.contains("action invoke doctor"));
     }
 
     #[test]
@@ -2136,121 +1955,6 @@ mod tests {
     }
 
     #[test]
-    fn setup_writes_recommended_keybindings_idempotently() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("herdr/config.toml");
-
-        let (added, skipped) = write_keybindings(&path).unwrap();
-        assert_eq!(added, RECOMMENDED_KEYS.len());
-        assert_eq!(skipped, 0);
-
-        let content = std::fs::read_to_string(&path).unwrap();
-        for (key, action, description) in RECOMMENDED_KEYS {
-            assert!(content.contains(&format!("key = {key:?}")));
-            assert!(content.contains(&format!("command = {action:?}")));
-            assert!(content.contains(&format!("description = {description:?}")));
-        }
-
-        let (added_again, skipped_again) = write_keybindings(&path).unwrap();
-        assert_eq!(added_again, 0);
-        assert_eq!(skipped_again, RECOMMENDED_KEYS.len());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
-    }
-
-    #[test]
-    fn setup_preserves_config_and_skips_conflicting_bindings() {
-        let dir = tempfile::tempdir().unwrap();
-        let herdr_dir = dir.path().join("herdr");
-        std::fs::create_dir_all(&herdr_dir).unwrap();
-        let path = herdr_dir.join("config.toml");
-        std::fs::write(
-            &path,
-            r#"
-# existing user config
-[[keys.command]]
-key = "prefix+p"
-type = "plugin_action"
-command = "herdr.scratch.toggle"
-description = "mine"
-
-[[keys.command]]
-key = "prefix+z"
-type = "builtin"
-command = "unrelated"
-"#,
-        )
-        .unwrap();
-
-        let (added, skipped) = write_keybindings(&path).unwrap();
-        assert_eq!(added, RECOMMENDED_KEYS.len() - 1);
-        assert_eq!(skipped, 1);
-
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.starts_with("\n# existing user config"));
-        assert!(content.contains("# Added by herdr-scratch setup"));
-        assert_eq!(content.matches("key = \"prefix+p\"").count(), 1);
-    }
-
-    #[test]
-    fn setup_reserves_keys_used_by_goto_and_other_key_tables() {
-        let dir = tempfile::tempdir().unwrap();
-        let herdr_dir = dir.path().join("herdr");
-        std::fs::create_dir_all(&herdr_dir).unwrap();
-        let path = herdr_dir.join("config.toml");
-        std::fs::write(
-            &path,
-            r#"
-# user uses prefix+shift+g for the goto overlay
-[[keys.goto]]
-key = "prefix+shift+g"
-
-[[keys.session]]
-key = "prefix+n"
-command = "attach"
-"#,
-        )
-        .unwrap();
-
-        let (added, skipped) = write_keybindings(&path).unwrap();
-        assert_eq!(added, RECOMMENDED_KEYS.len() - 2);
-        assert_eq!(skipped, 2);
-
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(content.matches("key = \"prefix+shift+g\"").count(), 1);
-        assert_eq!(content.matches("key = \"prefix+n\"").count(), 1);
-    }
-
-    #[test]
-    fn setup_appends_cleanly_to_a_file_without_a_trailing_newline() {
-        let dir = tempfile::tempdir().unwrap();
-        let herdr_dir = dir.path().join("herdr");
-        std::fs::create_dir_all(&herdr_dir).unwrap();
-        let path = herdr_dir.join("config.toml");
-        std::fs::write(&path, "[keys]").unwrap();
-
-        let (added, _) = write_keybindings(&path).unwrap();
-        assert_eq!(added, RECOMMENDED_KEYS.len());
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.starts_with("[keys]\n"));
-        assert!(content.contains("# Added by herdr-scratch setup"));
-    }
-
-    #[test]
-    fn setup_rejects_malformed_config_without_touching_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let herdr_dir = dir.path().join("herdr");
-        std::fs::create_dir_all(&herdr_dir).unwrap();
-        let path = herdr_dir.join("config.toml");
-        std::fs::write(&path, "not a valid toml [[").unwrap();
-
-        assert!(write_keybindings(&path).is_err());
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "not a valid toml [["
-        );
-    }
-
-    #[test]
     fn popup_busy_show_maps_to_a_friendly_hint() {
         let fake = FakeHerdr {
             popup_busy: true,
@@ -2303,7 +2007,7 @@ command = "attach"
             report
                 .issues
                 .iter()
-                .any(|issue| issue.contains("herdr-scratch setup"))
+                .any(|issue| issue.contains("server reload-config"))
         );
     }
 

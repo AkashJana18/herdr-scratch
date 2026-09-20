@@ -13,14 +13,9 @@ herdr-scratch daily [--vault PATH] [--date YYYY-MM-DD] [--print-path]
 herdr-scratch focus [name]
 herdr-scratch hide [name]
 herdr-scratch close [name]
-herdr-scratch resize <up|down> [name]
-herdr-scratch fullscreen [name]
-herdr-scratch reset [name]
-herdr-scratch setup
 herdr-scratch list [--json]
 herdr-scratch status [name] [--json]
 herdr-scratch rename <old> <new>
-herdr-scratch send <name> <text>
 herdr-scratch run <name> <command>
 herdr-scratch doctor [--json]
 herdr-scratch --version
@@ -32,9 +27,6 @@ herdr-scratch state path
 
 Public lifecycle words are `available`, `visible`, `hidden`, `stale`,
 `closed`, `unknown`, and `error`.
-
-The sizing commands (`resize`, `fullscreen`, `reset`) are deprecated no-ops
-that print a message and change nothing; they are retained for compatibility.
 
 ## Configuration
 
@@ -61,8 +53,6 @@ close_confirmation = true
 placement = "popup"
 split_direction = "right"
 change_path = true
-resize_step = "5%"
-fullscreen_size = "100%"
 
 [ui]
 title_template = "Scratchpad:{name}"
@@ -115,16 +105,9 @@ A one-shot command on the default scratchpad (`toggle -- lazygit`) shows the
 command's basename instead of the default name. Daily notes use
 `daily:YYYY-MM-DD` on both surfaces.
 
-`resize`, `fullscreen`, and `reset` are deprecated no-ops: the overlay surface
-always fills its pane, so the legacy width/height plumbing is retained only for
-backward-compatible config round-trips and is no longer honored.
-
-Popup width and height accept terminal cell counts or percentage strings from
-`"1%"` through `"100%"`. These values are deprecated and only retained for
-config round-trips.
-
-`behavior.resize_step` (default `"5%"`) and `behavior.fullscreen_size` (default
-`"100%"`) are likewise deprecated no-ops.
+The overlay viewer always fills its pane. `ui.popup` width/height are parsed
+and validated but no longer drive sizing; they remain in the config for
+backward-compatible round-trips.
 
 `behavior.change_path` (default `true`) mirrors floax's `@floax change_path`:
 when a bare-shell scratchpad is shown, its backing terminal runs `cd <host-cwd>`
@@ -190,10 +173,6 @@ herdr.scratch.notes
 herdr.scratch.daily
 herdr.scratch.list
 herdr.scratch.doctor
-herdr.scratch.size-up
-herdr.scratch.size-down
-herdr.scratch.fullscreen
-herdr.scratch.reset
 ```
 
 The manifest declares internal `scratch` and `viewer` pane entrypoints for the
@@ -203,13 +182,9 @@ internal entrypoint.
 
 ## Recommended Keybindings
 
-The plugin does not edit Herdr keybindings automatically, but `setup` writes
-them for you. `herdr-scratch setup` appends the bindings below to the Herdr
-config (from `HERDR_CONFIG_FILE`, `$XDG_CONFIG_HOME/herdr/config.toml`, or
-`~/.config/herdr/config.toml`). It is idempotent: actions already bound are
-skipped, keys already in use are left alone, and existing content and comments
-are preserved. A malformed config file is reported without being modified; run
-`herdr server reload-config` afterwards.
+Add the bindings below to the Herdr config (`HERDR_CONFIG_FILE`,
+`$XDG_CONFIG_HOME/herdr/config.toml`, or `~/.config/herdr/config.toml`), then
+run `herdr server reload-config`. `doctor` reports how many are still missing.
 
 ```toml
 [[keys.command]]
@@ -243,9 +218,4 @@ command = "herdr.scratch.daily"
 description = "open daily note"
 ```
 
-Equivalent CLI writing for the same bindings:
-
-```bash
-herdr-scratch setup
-herdr server reload-config
-```
+Apply with `herdr server reload-config` afterwards.

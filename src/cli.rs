@@ -11,8 +11,6 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Open the interactive Scratch quick-start guide.
-    Guide,
     /// Show the scratchpad, or return to the previous context when it is active.
     Toggle(OpenArgs),
     /// Create or show a scratchpad.
@@ -31,18 +29,8 @@ pub enum Command {
     Status(StatusArgs),
     /// Rename a scratchpad identity.
     Rename(RenameArgs),
-    /// Send text to a scratchpad without pressing Enter.
-    Send(SendArgs),
     /// Send a command to a scratchpad and press Enter.
     Run(RunArgs),
-    /// Resize a popup scratchpad.
-    Resize(ResizeArgs),
-    /// Toggle a popup scratchpad to fullscreen (or back to its previous size).
-    Fullscreen(NameArg),
-    /// Reset a popup scratchpad to its configured size.
-    Reset(NameArg),
-    /// Write recommended Herdr keybindings for the scratchpad actions.
-    Setup,
     /// Validate Herdr Scratch configuration and runtime connectivity.
     Doctor(JsonArg),
     /// Print config paths.
@@ -55,9 +43,6 @@ pub enum Command {
     /// Internal popup attachment entrypoint.
     #[command(hide = true)]
     Attach,
-    /// Internal quick-start popup entrypoint.
-    #[command(hide = true)]
-    GuidePane,
 }
 
 #[derive(Debug, Args)]
@@ -105,30 +90,9 @@ pub struct RenameArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct SendArgs {
-    pub name: String,
-    pub text: Vec<String>,
-}
-
-#[derive(Debug, Args)]
 pub struct RunArgs {
     pub name: String,
     pub command: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum ResizeDirection {
-    /// Increase the popup size.
-    Up,
-    /// Decrease the popup size.
-    Down,
-}
-
-#[derive(Debug, Args)]
-pub struct ResizeArgs {
-    #[arg(value_enum)]
-    pub direction: ResizeDirection,
-    pub name: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -254,47 +218,5 @@ mod tests {
         assert_eq!(args.vault.as_deref(), Some("/tmp/vault"));
         assert!(args.print_path);
         assert_eq!(args.date.as_deref(), Some("2026-09-19"));
-    }
-
-    #[test]
-    fn parses_guide() {
-        let cli = Cli::parse_from(["herdr-scratch", "guide"]);
-        assert!(matches!(cli.command, Command::Guide));
-    }
-
-    #[test]
-    fn parses_setup_without_arguments() {
-        let cli = Cli::parse_from(["herdr-scratch", "setup"]);
-        assert!(matches!(cli.command, Command::Setup));
-    }
-
-    #[test]
-    fn parses_resize_direction_and_fullscreen() {
-        let up = Cli::parse_from(["herdr-scratch", "resize", "up"]);
-        assert!(matches!(
-            up.command,
-            Command::Resize(ResizeArgs {
-                direction: ResizeDirection::Up,
-                ..
-            })
-        ));
-        let named_down = Cli::parse_from(["herdr-scratch", "resize", "down", "notes"]);
-        if let Command::Resize(ResizeArgs { direction, name }) = named_down.command {
-            assert_eq!(direction, ResizeDirection::Down);
-            assert_eq!(name.as_deref(), Some("notes"));
-        } else {
-            panic!("expected resize command");
-        }
-        let fullscreen = Cli::parse_from(["herdr-scratch", "fullscreen"]);
-        assert!(matches!(
-            fullscreen.command,
-            Command::Fullscreen(NameArg { name: None })
-        ));
-        let reset = Cli::parse_from(["herdr-scratch", "reset", "scratch"]);
-        if let Command::Reset(NameArg { name }) = reset.command {
-            assert_eq!(name.as_deref(), Some("scratch"));
-        } else {
-            panic!("expected reset command");
-        }
     }
 }

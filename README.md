@@ -15,6 +15,8 @@ prebuilt binaries from GitHub Releases, so users do not need Rust or Cargo.
 - Named scratchpads with `toggle`, `open`, `focus`, `hide`, and `close`.
 - An overlay viewer pane that keeps every Herdr key (including the toggle
   binding) live while the scratchpad is focused.
+- Dynamic viewer titles: the floating header shows `Scratchpad:{name}`
+  (or `daily:YYYY-MM-DD` for daily notes), refreshed on every show and focus.
 - `change_path` cwd-sync: opening a bare-shell scratchpad cds its terminal to
   the directory of the pane you opened it from (floax's `@floax change_path`).
 - One-shot command scratchpads, such as `open lazygit -- lazygit`.
@@ -51,13 +53,7 @@ herdr plugin install AkashJana18/herdr-scratch
 
 ## Quick Start
 
-Open the visible getting-started guide:
-
-```bash
-herdr plugin action invoke guide --plugin herdr.scratch
-```
-
-Then toggle the default persistent scratchpad:
+Toggle the default persistent scratchpad:
 
 ```bash
 herdr plugin action invoke toggle --plugin herdr.scratch
@@ -159,8 +155,6 @@ close_confirmation = true
 placement = "popup"
 split_direction = "right"
 change_path = true
-resize_step = "5%"
-fullscreen_size = "100%"
 
 [ui]
 title_template = "Scratchpad:{name}"
@@ -199,21 +193,15 @@ interface.
 ## Commands
 
 ```text
-herdr-scratch guide
 herdr-scratch toggle [name] [-- <command>...]
 herdr-scratch open [name] [-- <command>...]
 herdr-scratch daily [--vault PATH] [--date YYYY-MM-DD] [--print-path]
 herdr-scratch focus [name]
 herdr-scratch hide [name]
 herdr-scratch close [name]
-herdr-scratch resize <up|down> [name]
-herdr-scratch fullscreen [name]
-herdr-scratch reset [name]
-herdr-scratch setup
 herdr-scratch list [--json]
 herdr-scratch status [name] [--json]
 herdr-scratch rename <old> <new>
-herdr-scratch send <name> <text>
 herdr-scratch run <name> <command>
 herdr-scratch doctor [--json]
 herdr-scratch --version
@@ -223,16 +211,7 @@ herdr-scratch config add <name> [--scope workspace|cwd|global] [--cwd context|wo
 herdr-scratch state path
 ```
 
-The sizing commands (`resize`, `fullscreen`, `reset`) are deprecated no-ops:
-the overlay viewer always fills its pane and cannot be sized.
-
 ## Usage Examples
-
-Open the quick-start guide:
-
-```bash
-herdr-scratch guide
-```
 
 Toggle the default scratchpad:
 
@@ -271,28 +250,19 @@ herdr-scratch config init
 herdr-scratch config add lazygit -- lazygit
 ```
 
-Send a command to an existing scratchpad:
+Run a command in an existing scratchpad:
 
 ```bash
 herdr-scratch run notes "git status"
 ```
 
-One-time onboarding: write the recommended Herdr keybindings for the plugin
-actions. The write is idempotent, never overwrites the config, and skips any
-key that is already in use:
+Add the recommended Herdr keybindings manually (see below), then apply them:
 
 ```bash
-herdr-scratch setup
 herdr server reload-config
 ```
 
-The legacy sizing commands (`resize`, `fullscreen`, `reset`) are retained as
-no-ops: the overlay viewer always fills its pane and cannot be sized.
-
-```bash
-herdr-scratch resize up     # prints a deprecation note
-herdr-scratch fullscreen    # prints a deprecation note
-```
+`doctor` reports any recommended keybindings you still miss:
 
 Bare-shell scratchpads follow the pane they were opened from by default: opening
 a scratchpad from `/path/to/project` runs `cd /path/to/project` inside it, so
@@ -308,8 +278,7 @@ herdr-scratch status notes
 herdr-scratch doctor
 ```
 
-Recommended Herdr keybindings (also written automatically by
-`herdr-scratch setup`, which never steals keys you have already bound):
+Recommended Herdr keybindings (add them to `~/.config/herdr/config.toml`):
 
 ```toml
 [[keys.command]]

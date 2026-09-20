@@ -23,14 +23,12 @@ use std::{
 pub const PLUGIN_ID: &str = "herdr.scratch";
 const RUNTIME_ENTRYPOINT: &str = "scratch";
 const VIEWER_ENTRYPOINT: &str = "viewer";
-const GUIDE_ENTRYPOINT: &str = "guide";
 
 pub trait Herdr {
     fn available(&self) -> bool;
     fn version(&self) -> Option<String>;
     fn server_reachable(&self) -> bool;
     fn current_pane(&self) -> Result<PaneInfo, HerdrError>;
-    fn open_guide(&self) -> Result<(), HerdrError>;
     fn tab_get(&self, tab_id: &str) -> Result<TabInfo, HerdrError>;
     fn handle_get(&self, handle: &RuntimeHandle) -> Result<PaneInfo, HerdrError>;
     fn show_handle(
@@ -43,7 +41,6 @@ pub trait Herdr {
     fn open_scratchpad(&self, request: OpenScratchpadRequest) -> Result<RuntimeHandle, HerdrError>;
     fn rename_handle(&self, handle: &RuntimeHandle, title: &str) -> Result<(), HerdrError>;
     fn close_handle(&self, handle: &RuntimeHandle) -> Result<(), HerdrError>;
-    fn send_text(&self, handle: &RuntimeHandle, text: &str) -> Result<(), HerdrError>;
     fn run_command(&self, handle: &RuntimeHandle, command: &str) -> Result<(), HerdrError>;
 }
 
@@ -307,24 +304,6 @@ impl Herdr for HerdrCli {
         parse_pane_result(value)
     }
 
-    fn open_guide(&self) -> Result<(), HerdrError> {
-        self.run_ok(&[
-            "plugin".into(),
-            "pane".into(),
-            "open".into(),
-            "--plugin".into(),
-            PLUGIN_ID.into(),
-            "--entrypoint".into(),
-            GUIDE_ENTRYPOINT.into(),
-            "--placement".into(),
-            "popup".into(),
-            "--width".into(),
-            "70%".into(),
-            "--height".into(),
-            "60%".into(),
-        ])
-    }
-
     fn tab_get(&self, tab_id: &str) -> Result<TabInfo, HerdrError> {
         let value = self.run(&["tab".into(), "get".into(), tab_id.into()])?;
         parse_tab_result(value)
@@ -492,21 +471,6 @@ impl Herdr for HerdrCli {
                 "pane".into(),
                 "close".into(),
                 pane_id.into(),
-            ],
-        )
-    }
-
-    fn send_text(&self, handle: &RuntimeHandle, text: &str) -> Result<(), HerdrError> {
-        let Some(pane_id) = handle.pane_id.as_deref() else {
-            return Err(HerdrError::MissingHandle("pane_id"));
-        };
-        self.run_ok_for(
-            handle.session.as_deref(),
-            &[
-                "pane".into(),
-                "send-text".into(),
-                pane_id.into(),
-                text.into(),
             ],
         )
     }

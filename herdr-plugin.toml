@@ -9,13 +9,6 @@ platforms = ["linux", "macos"]
 command = ["/bin/sh", "-c", "exec \"${HERDR_PLUGIN_ROOT:-.}/scripts/install-binary.sh\""]
 
 [[actions]]
-id = "guide"
-title = "Scratch quick start"
-description = "Open a visible guide to toggling, hiding, and configuring Scratch."
-contexts = ["global", "workspace", "tab", "pane"]
-command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" guide"]
-
-[[actions]]
 id = "toggle"
 title = "Toggle scratchpad"
 description = "Show the default scratchpad, or return to the previous Herdr context when it is active."
@@ -63,43 +56,6 @@ title = "Open daily note"
 description = "Open today's daily note in your Obsidian vault (auto-detected) or a local fallback file."
 contexts = ["workspace", "tab", "pane"]
 command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" daily"]
-
-[[actions]]
-id = "size-up"
-title = "Increase popup size (deprecated)"
-description = "The overlay viewer no longer supports sizing; this action is a no-op."
-contexts = ["workspace", "tab", "pane"]
-command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" resize up"]
-
-[[actions]]
-id = "size-down"
-title = "Decrease popup size (deprecated)"
-description = "The overlay viewer no longer supports sizing; this action is a no-op."
-contexts = ["workspace", "tab", "pane"]
-command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" resize down"]
-
-[[actions]]
-id = "fullscreen"
-title = "Toggle popup fullscreen (deprecated)"
-description = "The overlay viewer no longer supports sizing; this action is a no-op."
-contexts = ["workspace", "tab", "pane"]
-command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" fullscreen"]
-
-[[actions]]
-id = "reset"
-title = "Reset popup size (deprecated)"
-description = "The overlay viewer no longer supports sizing; this action is a no-op."
-contexts = ["workspace", "tab", "pane"]
-command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" reset"]
-
-[[panes]]
-id = "guide"
-title = "Scratch quick start"
-description = "Interactive first-run guide for Scratch."
-placement = "popup"
-width = "70%"
-height = "60%"
-command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" guide-pane"]
 
 [[panes]]
 id = "scratch"
