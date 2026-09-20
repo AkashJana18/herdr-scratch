@@ -34,7 +34,8 @@ only.
 - `src/config.rs`: loads versioned TOML config and supplies defaults.
 - `src/registry.rs`: loads, saves, and migrates versioned JSON state.
 - `src/herdr.rs`: Herdr adapter trait and current CLI-backed implementation.
-- `src/scratchpad.rs`: orchestration for toggle/open/focus/hide/close/list.
+- `src/obsidian.rs`: vault auto-detect, daily-notes config, date rendering.
+- `src/scratchpad.rs`: orchestration for toggle/open/daily/focus/hide/close/list.
 - `src/output.rs`: human and JSON output formatting.
 - `herdr-plugin.toml`: Marketplace-style manifest actions and internal session
   entrypoint.
@@ -48,7 +49,9 @@ only.
 3. `config` loads defaults and user overrides.
 4. `registry` loads soft references to known scratchpads.
 5. `scratchpad` resolves the requested name and scope from config plus Herdr
-   invocation context.
+   invocation context. `daily` instead resolves to the global `daily`
+   scratchpad with a date-computed file (explicit vault, auto-detect, or
+   local fallback).
 6. `herdr` validates any existing runtime handle.
 7. If a popup handle is live, `scratchpad` opens a direct-attach viewer in the
    invoking session. Otherwise it creates a runtime in the private backing
@@ -101,8 +104,8 @@ Required adapter operations:
 - attach a popup viewer to a backing terminal
 - close the active popup without closing its backing terminal
 - rename a scratchpad runtime
+- rename the overlay viewer pane
 - close a scratchpad runtime
-- send text
 - run a command
 
 ## Lifecycle Semantics
@@ -110,6 +113,9 @@ Required adapter operations:
 - `toggle`: show a scratchpad popup, or hide it when an external caller targets
   a currently attached popup.
 - `open`: create or show a scratchpad.
+- `daily`: resolve today's note (explicit vault, auto-detect, or local
+  fallback) and show it in the global `daily` scratchpad, rolling over when
+  the date changes.
 - `focus`: focus only if it already exists.
 - `hide`: close the popup viewer while leaving the backing terminal running.
 - `close`: terminate and remove the live runtime handle.
@@ -138,14 +144,15 @@ Supported extension points:
 - Add integration tests with a fake `Herdr` adapter before testing against a
   real Herdr server.
 - Manual smoke test against Herdr before publishing: link, doctor, toggle, list,
-  status, send, run, close.
+  status, run, close.
 - Release smoke test before publishing: install into a clean plugin root,
   verify checksum-protected binary download, then run `--version` and `doctor`.
 
 ## Current Limitations
 
-- Herdr routes all input to an open popup, so the plugin action keybinding
-  cannot fire from inside it. Use Herdr's direct-attach `ctrl+b q` chord.
-- Herdr supports one session-modal popup at a time per session.
+- The overlay viewer is a real pane, so Herdr keys (including toggle) keep
+  working while it is focused. Herdr still supports one session-modal popup at
+  a time per session: opening a second viewer reports a friendly
+  detach-with-`ctrl+b q` hint.
 - There is no Herdr-managed plugin storage API; files are owned by the plugin.
 - Registry handles are best-effort and must always be validated.

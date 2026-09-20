@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod herdr;
+mod obsidian;
 mod output;
 mod registry;
 mod scratchpad;
@@ -19,9 +20,6 @@ fn main() {
 fn run(args: cli::Cli) -> anyhow::Result<()> {
     if matches!(&args.command, cli::Command::Session) {
         return scratchpad::run_runtime_session();
-    }
-    if matches!(&args.command, cli::Command::GuidePane) {
-        return scratchpad::run_guide_pane();
     }
     let paths = config::Paths::discover().context("failed to discover plugin paths")?;
     if matches!(&args.command, cli::Command::Attach) {

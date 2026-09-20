@@ -40,6 +40,7 @@ pub struct Config {
     pub scope: ScopeConfig,
     pub profiles: BTreeMap<String, ProfileConfig>,
     pub scratchpads: BTreeMap<String, ScratchpadConfig>,
+    pub notes: NotesConfig,
 }
 
 impl Default for Config {
@@ -59,6 +60,7 @@ impl Default for Config {
             scope: ScopeConfig::default(),
             profiles,
             scratchpads,
+            notes: NotesConfig::default(),
         }
     }
 }
@@ -105,6 +107,65 @@ impl Config {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NotesConfig {
+    /// Explicit vault path. Wins over auto-detection when set.
+    #[serde(default)]
+    pub vault_path: Option<String>,
+    /// Parse Obsidian's `obsidian.json` registry when no explicit vault is set.
+    #[serde(default = "default_true")]
+    pub vault_auto: bool,
+    /// Override path to `obsidian.json` (portable installs, Flatpak/Snap, tests).
+    #[serde(default)]
+    pub obsidian_config: Option<String>,
+    /// Force daily-note subdir inside the vault. Empty = read from
+    /// `.obsidian/daily-notes.json`, then vault root.
+    #[serde(default)]
+    pub daily_subdir: Option<String>,
+    /// Force Moment.js daily-note format. Empty = read from vault config.
+    #[serde(default)]
+    pub daily_format: Option<String>,
+    /// Force template file path. Empty = read from vault config.
+    #[serde(default)]
+    pub template_path: Option<String>,
+    /// Directory for local daily files when no vault resolves.
+    /// Empty = `<state_dir>/daily`.
+    #[serde(default)]
+    pub fallback_dir: Option<String>,
+    /// Editor binary. Empty = `$VISUAL`/`$EDITOR`, then `vim`.
+    #[serde(default)]
+    pub editor: Option<String>,
+}
+
+impl Default for NotesConfig {
+    fn default() -> Self {
+        Self {
+            vault_path: None,
+            vault_auto: true,
+            obsidian_config: None,
+            daily_subdir: None,
+            daily_format: None,
+            template_path: None,
+            fallback_dir: None,
+            editor: None,
+        }
+    }
+}
+
+impl NotesConfig {
+    pub fn vault_path_set(&self) -> Option<&str> {
+        self.vault_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BehaviorConfig {
@@ -117,10 +178,6 @@ pub struct BehaviorConfig {
     /// Sync a popup scratchpad's working directory to the pane it was opened
     /// from (the `change_path` floax behavior).
     pub change_path: bool,
-    /// Popup size delta applied by `resize up` and `resize down`.
-    pub resize_step: PopupDimension,
-    /// Popup size used by `fullscreen`.
-    pub fullscreen_size: PopupDimension,
 }
 
 impl Default for BehaviorConfig {
@@ -133,8 +190,6 @@ impl Default for BehaviorConfig {
             placement: ScratchpadPlacement::Popup,
             split_direction: SplitDirection::Right,
             change_path: true,
-            resize_step: PopupDimension::Percent("5%".to_string()),
-            fullscreen_size: PopupDimension::Percent("100%".to_string()),
         }
     }
 }
@@ -186,7 +241,7 @@ pub struct UiConfig {
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
-            title_template: "scratch:{name}".to_string(),
+            title_template: "Scratchpad:{name}".to_string(),
             status_notifications: NotificationMode::Errors,
             popup: PopupConfig::default(),
         }
@@ -209,27 +264,6 @@ impl Default for PopupConfig {
     }
 }
 
-impl PopupConfig {
-    pub fn size(&self) -> PopupSize {
-        PopupSize {
-            width: self.width.clone(),
-            height: self.height.clone(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PopupSize {
-    pub width: PopupDimension,
-    pub height: PopupDimension,
-}
-
-impl PopupSize {
-    pub fn to_arg_pairs(&self) -> (String, String) {
-        (self.width.as_arg(), self.height.as_arg())
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum PopupDimension {
@@ -238,57 +272,6 @@ pub enum PopupDimension {
 }
 
 impl PopupDimension {
-    pub fn as_arg(&self) -> String {
-        match self {
-            Self::Cells(value) => value.to_string(),
-            Self::Percent(value) => value.clone(),
-        }
-    }
-
-    /// Parse a stored dimension string (`"NN"` cells or `"NN%"` percentage).
-    pub fn parse_str(raw: &str) -> Option<Self> {
-        if let Some(percent) = raw.strip_suffix('%') {
-            let value = percent.parse::<u16>().ok()?;
-            if (1..=100).contains(&value) {
-                return Some(Self::Percent(format!("{value}%")));
-            }
-            None
-        } else {
-            raw.parse::<u16>()
-                .ok()
-                .filter(|value| *value > 0)
-                .map(Self::Cells)
-        }
-    }
-
-    /// Move a popup dimension toward fullscreen (`up`) or smaller (`down`).
-    ///
-    /// Mixed units follow the dimension's own unit: a percentage step applies to
-    /// a percentage dimension, and an absolute-cell step applies to a cell
-    /// dimension. Results clamp to a sane outer popup range.
-    pub fn apply_step(&self, step: &PopupDimension, up: bool) -> Self {
-        match self {
-            Self::Percent(_) => {
-                let current = percent_points(self).unwrap_or(80).clamp(10, 100);
-                let delta = percent_points(step).unwrap_or(5).abs().max(1);
-                let next = if up { current + delta } else { current - delta };
-                Self::Percent(format!("{}%", next.clamp(10, 100)))
-            }
-            Self::Cells(_) => {
-                let current = match self {
-                    Self::Cells(value) => i32::from(*value),
-                    Self::Percent(_) => unreachable!("matched branch"),
-                };
-                let delta = match step {
-                    Self::Cells(value) => i32::from(*value),
-                    Self::Percent(_) => percent_points(step).unwrap_or(5).abs().max(1),
-                };
-                let next = if up { current + delta } else { current - delta };
-                Self::Cells(next.clamp(1, i32::from(u16::MAX)) as u16)
-            }
-        }
-    }
-
     fn validate(&self, field: &str) -> anyhow::Result<()> {
         match self {
             Self::Cells(0) => anyhow::bail!("{field} must be greater than zero"),
@@ -306,13 +289,6 @@ impl PopupDimension {
                 Ok(())
             }
         }
-    }
-}
-
-fn percent_points(value: &PopupDimension) -> Option<i32> {
-    match value {
-        PopupDimension::Percent(raw) => raw.strip_suffix('%')?.parse().ok(),
-        PopupDimension::Cells(cells) => Some(i32::from(*cells)),
     }
 }
 
@@ -446,74 +422,43 @@ mod tests {
         assert_eq!(config.scope.default, ScopeKind::Workspace);
         assert_eq!(config.behavior.placement, ScratchpadPlacement::Popup);
         assert_eq!(config.behavior.split_direction, SplitDirection::Right);
-        assert_eq!(config.ui.popup.width.as_arg(), "80%");
+        assert!(matches!(
+            config.ui.popup.width,
+            PopupDimension::Percent(ref width) if width == "80%"
+        ));
         assert_eq!(config.runtime.backing_session, "herdr-scratch");
         assert!(config.profiles.contains_key("default"));
-        assert_eq!(config.behavior.resize_step.as_arg(), "5%");
-        assert_eq!(config.behavior.fullscreen_size.as_arg(), "100%");
         assert!(config.behavior.change_path);
+        assert_eq!(config.ui.title_template, "Scratchpad:{name}");
+        assert!(config.notes.vault_path.is_none());
+        assert!(config.notes.vault_auto);
+        assert!(config.notes.editor.is_none());
     }
 
     #[test]
-    fn parses_resize_config_keys() {
+    fn parses_notes_config_keys() {
         let config: Config = toml::from_str(
             r#"
 version = 1
 
-[behavior]
-resize_step = "4%"
-fullscreen_size = "95%"
-change_path = false
+[notes]
+vault_path = "/vault"
+vault_auto = false
+daily_subdir = "Daily"
+daily_format = "YYYY/MM/DD"
+template_path = "/vault/Tpl.md"
+fallback_dir = "/tmp/fallback"
+editor = "nvim"
         "#,
         )
         .unwrap();
-        assert_eq!(config.behavior.resize_step.as_arg(), "4%");
-        assert_eq!(config.behavior.fullscreen_size.as_arg(), "95%");
-        assert!(!config.behavior.change_path);
-    }
-
-    #[test]
-    fn popup_dimension_parse_str_round_trips() {
-        assert_eq!(PopupDimension::parse_str("85%").unwrap().as_arg(), "85%");
-        assert_eq!(PopupDimension::parse_str("42").unwrap().as_arg(), "42");
-        assert_eq!(PopupDimension::parse_str("0%"), None);
-        assert_eq!(PopupDimension::parse_str("101%"), None);
-        assert_eq!(PopupDimension::parse_str("0"), None);
-        assert_eq!(PopupDimension::parse_str("nope"), None);
-    }
-
-    #[test]
-    fn resize_step_moves_percent_dimensions_and_clamps() {
-        let base = PopupDimension::Percent("80%".to_string());
-        let step = PopupDimension::Percent("5%".to_string());
-        assert_eq!(base.apply_step(&step, true).as_arg(), "85%");
-        assert_eq!(base.apply_step(&step, false).as_arg(), "75%");
-        let at_floor = PopupDimension::Percent("12%".to_string());
-        assert_eq!(at_floor.apply_step(&step, false).as_arg(), "10%");
-        let near_ceiling = PopupDimension::Percent("97%".to_string());
-        assert_eq!(near_ceiling.apply_step(&step, true).as_arg(), "100%");
-    }
-
-    #[test]
-    fn resize_step_moves_cell_dimensions() {
-        let base = PopupDimension::Cells(80);
-        let step = PopupDimension::Cells(5);
-        assert_eq!(base.apply_step(&step, true).as_arg(), "85");
-        assert_eq!(base.apply_step(&step, false).as_arg(), "75");
-        assert_eq!(
-            PopupDimension::Cells(3).apply_step(&step, false).as_arg(),
-            "1"
-        );
-    }
-
-    #[test]
-    fn mixed_resize_step_follows_dimension_unit() {
-        let percent = PopupDimension::Percent("50%".to_string());
-        let cells_step = PopupDimension::Cells(7);
-        assert_eq!(percent.apply_step(&cells_step, true).as_arg(), "57%");
-        let cells = PopupDimension::Cells(50);
-        let percent_step = PopupDimension::Percent("7%".to_string());
-        assert_eq!(cells.apply_step(&percent_step, true).as_arg(), "57");
+        assert_eq!(config.notes.vault_path.as_deref(), Some("/vault"));
+        assert!(!config.notes.vault_auto);
+        assert_eq!(config.notes.daily_subdir.as_deref(), Some("Daily"));
+        assert_eq!(config.notes.daily_format.as_deref(), Some("YYYY/MM/DD"));
+        assert_eq!(config.notes.template_path.as_deref(), Some("/vault/Tpl.md"));
+        assert_eq!(config.notes.fallback_dir.as_deref(), Some("/tmp/fallback"));
+        assert_eq!(config.notes.editor.as_deref(), Some("nvim"));
     }
 
     #[test]
@@ -558,8 +503,11 @@ height = 42
         "#,
         )
         .unwrap();
-        assert_eq!(config.ui.popup.width.as_arg(), "90%");
-        assert_eq!(config.ui.popup.height.as_arg(), "42");
+        assert!(matches!(
+            config.ui.popup.width,
+            PopupDimension::Percent(ref width) if width == "90%"
+        ));
+        assert!(matches!(config.ui.popup.height, PopupDimension::Cells(42)));
     }
 
     #[test]

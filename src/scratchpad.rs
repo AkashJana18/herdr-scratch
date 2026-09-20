@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
 };
 
@@ -8,15 +8,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     cli,
-    config::{
-        Config, CwdMode, Paths, PopupDimension, PopupSize, ProfileConfig, ScopeKind,
-        ScratchpadConfig,
-    },
+    config::{Config, CwdMode, Paths, ProfileConfig, ScopeKind, ScratchpadConfig},
     herdr::{Herdr, HerdrCli, OpenScratchpadRequest},
+    obsidian::{self, NotesSource},
     output::Output,
     registry::{
         FocusSnapshot, LifecycleStatus, Registry, RegistryStore, RuntimeHandle, ScopeRecord,
-        ScratchpadRecord, now_rfc3339, registry_key,
+        ScratchpadRecord, ViewerInfo, now_rfc3339, registry_key,
     },
 };
 
@@ -45,7 +43,21 @@ pub struct DoctorReport {
     pub scratchpad_count: usize,
     #[serde(default)]
     pub keybinding_missing: usize,
+    #[serde(default)]
+    pub notes_source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes_file: Option<String>,
     pub issues: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct DailyTarget {
+    file: PathBuf,
+    source: NotesSource,
+    editor: String,
+    date_str: String,
+    template: Option<PathBuf>,
+    cwd: PathBuf,
 }
 
 pub struct ScratchApp<H> {
@@ -70,13 +82,13 @@ impl<H: Herdr> ScratchApp<H> {
 
     pub fn handle(&mut self, command: cli::Command) -> anyhow::Result<Output> {
         match command {
-            cli::Command::Guide => self.guide(),
             cli::Command::Toggle(args) => {
                 self.toggle(args.name.as_deref(), command_override(args.command))
             }
             cli::Command::Open(args) => {
                 self.open(args.name.as_deref(), command_override(args.command))
             }
+            cli::Command::Daily(args) => self.daily(&args),
             cli::Command::Focus(args) => self.focus(args.name.as_deref()),
             cli::Command::Hide(args) => self.hide(args.name.as_deref()),
             cli::Command::Close(args) => self.close(args.name.as_deref()),
@@ -86,12 +98,7 @@ impl<H: Herdr> ScratchApp<H> {
             }),
             cli::Command::Status(args) => self.status(args.name.as_deref(), args.json),
             cli::Command::Rename(args) => self.rename(&args.old, &args.new),
-            cli::Command::Send(args) => self.send(&args.name, &args.text.join(" ")),
             cli::Command::Run(args) => self.run_in_scratchpad(&args.name, &args.command.join(" ")),
-            cli::Command::Resize(args) => self.resize(args.direction, args.name.as_deref()),
-            cli::Command::Fullscreen(args) => self.fullscreen(args.name.as_deref()),
-            cli::Command::Reset(args) => self.reset(args.name.as_deref()),
-            cli::Command::Setup => self.setup(),
             cli::Command::Doctor(args) => Ok(Output::Doctor {
                 report: self.doctor(),
                 json: args.json,
@@ -102,19 +109,235 @@ impl<H: Herdr> ScratchApp<H> {
             }) => Ok(Output::Text(self.paths.registry_file.display().to_string())),
             cli::Command::Session => anyhow::bail!("session must be handled before app startup"),
             cli::Command::Attach => anyhow::bail!("attach must be handled before app startup"),
-            cli::Command::GuidePane => {
-                anyhow::bail!("guide-pane must be handled before app startup")
-            }
         }
     }
 
-    fn guide(&self) -> anyhow::Result<Output> {
-        self.herdr.open_guide().map_err(|err| {
-            anyhow::anyhow!(
-                "failed to open the Scratch guide popup: {err}. If another popup is open, detach it with ctrl+b q and try again"
-            )
+    fn daily(&mut self, args: &cli::DailyArgs) -> anyhow::Result<Output> {
+        let date = parse_daily_date(args.date.as_deref())?;
+        let target = self.resolve_daily_target(args.vault.as_deref(), date)?;
+        obsidian::ensure_daily_file(&target.file, target.template.as_deref(), &target.date_str)?;
+        if args.print_path {
+            return Ok(Output::Text(target.file.display().to_string()));
+        }
+        self.open_daily(target)
+    }
+
+    fn resolve_daily_target(
+        &self,
+        vault_override: Option<&str>,
+        date: time::Date,
+    ) -> anyhow::Result<DailyTarget> {
+        let notes = &self.config.notes;
+        let cli_vault = vault_override.map(str::trim).filter(|s| !s.is_empty());
+        let explicit = cli_vault.or_else(|| notes.vault_path_set());
+        let from_cli = cli_vault.is_some();
+
+        let (vault, source) = if let Some(raw) = explicit {
+            let path = PathBuf::from(raw);
+            if !path.is_dir() {
+                if from_cli {
+                    anyhow::bail!(
+                        "vault `{raw}` does not exist; pass an existing Obsidian vault path"
+                    );
+                }
+                anyhow::bail!(
+                    "configured notes vault `{raw}` does not exist; fix `notes.vault_path` or unset it to use auto-detect"
+                );
+            }
+            (Some(path), NotesSource::Explicit)
+        } else if notes.vault_auto {
+            let detected =
+                obsidian::pick_vault(obsidian::detect_vaults(notes.obsidian_config.as_deref()))
+                    .or_else(obsidian::fallback_vault);
+            match detected {
+                Some(path) => (Some(path), NotesSource::Auto),
+                None => (None, NotesSource::Fallback),
+            }
+        } else {
+            (None, NotesSource::Fallback)
+        };
+
+        let vault_config = vault
+            .as_deref()
+            .map(obsidian::read_daily_config)
+            .unwrap_or_default();
+        let folder = notes
+            .daily_subdir
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.trim_matches('/').to_string())
+            .unwrap_or(vault_config.folder);
+        let format = notes
+            .daily_format
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&vault_config.format)
+            .to_string();
+        let format = if format.trim().is_empty() {
+            "YYYY-MM-DD".to_string()
+        } else {
+            format
+        };
+        let template = match notes
+            .template_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(raw) => Some(PathBuf::from(raw)),
+            None => {
+                obsidian::resolve_template_path(vault.as_deref(), vault_config.template.as_deref())
+            }
+        };
+
+        let filename = obsidian::daily_filename(date, &format);
+        let file = match vault.as_deref() {
+            Some(vault) => {
+                let folder_path = if folder.is_empty() {
+                    vault.to_path_buf()
+                } else {
+                    vault.join(&folder)
+                };
+                folder_path.join(&filename)
+            }
+            None => {
+                let base = notes
+                    .fallback_dir
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| self.paths.state_dir.join("daily"));
+                base.join(obsidian::daily_filename(date, &format))
+            }
+        };
+        let date_str = obsidian::iso_date(date);
+        let editor = obsidian::resolve_editor(notes.editor.as_deref());
+        let cwd = file
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.paths.state_dir.clone());
+        Ok(DailyTarget {
+            file,
+            source,
+            editor,
+            date_str,
+            template,
+            cwd,
+        })
+    }
+
+    fn open_daily(&mut self, target: DailyTarget) -> anyhow::Result<Output> {
+        let scope = ScopeRecord {
+            kind: "global".to_string(),
+            key: "default".to_string(),
+        };
+        let key = registry_key(&scope, "daily");
+        let file_str = target.file.display().to_string();
+        let launch = vec![target.editor.clone(), file_str.clone()];
+        let title = Self::daily_title(&target.date_str);
+        let current = self.herdr.current_pane().ok();
+
+        // Same-day reuse: a live `daily` runtime already on today's file just
+        // gets shown/focused like any other scratchpad.
+        if self.config.behavior.reuse_existing
+            && let Some(record) = self.registry.scratchpads.get(&key).cloned()
+            && let Some(handle) = record.handle.clone()
+            && record.launch_command.as_deref() == Some(launch.as_slice())
+            && self.ensure_live(&handle).is_ok()
+        {
+            if self.viewer_active(&key) {
+                self.rename_viewer_best_effort(&key, &title);
+                self.viewer_focus(&key);
+                self.update_visible(&key, current.map(FocusSnapshot::from));
+                self.save()?;
+                return Ok(Output::Text(format!(
+                    "daily note `{}` is already visible ({})",
+                    target.date_str, target.source
+                )));
+            }
+            let viewer = self.show_or_friendly(&handle, &key)?;
+            self.record_viewer(&key, viewer);
+            self.rename_viewer_best_effort(&key, &title);
+            self.viewer_focus(&key);
+            self.update_visible(&key, current.map(FocusSnapshot::from));
+            self.save()?;
+            return Ok(Output::Text(format!(
+                "opened daily note `{}` ({})",
+                target.date_str, target.source
+            )));
+        }
+
+        // New day (or stale/missing runtime): tear down the old runtime so the
+        // single global `daily` scratchpad always tracks the resolved file.
+        if let Some(old) = self.registry.scratchpads.get(&key).cloned()
+            && let Some(handle) = old.handle.as_ref()
+        {
+            let _ = self.herdr.close_handle(handle);
+        }
+
+        let previous_focus = current.map(FocusSnapshot::from);
+        let mut env = BTreeMap::new();
+        env.insert("HERDR_SCRATCH_NAME".to_string(), "daily".to_string());
+        env.insert("HERDR_SCRATCH_PROFILE".to_string(), "daily".to_string());
+        env.insert(
+            "HERDR_SCRATCH_COMMAND_JSON".to_string(),
+            serde_json::to_string(&launch)?,
+        );
+        let handle = self.herdr.open_scratchpad(OpenScratchpadRequest {
+            cwd: Some(target.cwd.display().to_string()),
+            env,
+            title: title.clone(),
+            backing_session: self.config.runtime.backing_session.clone(),
+            placement: self.config.behavior.placement,
+            split_direction: self.config.behavior.split_direction,
         })?;
-        Ok(Output::Text("opened Scratch quick start".to_string()))
+        self.rename_handle_best_effort(&handle, &title);
+        let now = now_rfc3339();
+        let created_at = self
+            .registry
+            .scratchpads
+            .get(&key)
+            .map(|record| record.created_at.clone())
+            .unwrap_or_else(|| now.clone());
+        self.registry.insert(
+            key.clone(),
+            ScratchpadRecord {
+                name: "daily".to_string(),
+                scope,
+                profile: "daily".to_string(),
+                status: LifecycleStatus::Visible,
+                launch_command: Some(launch),
+                handle: Some(handle.clone()),
+                cwd: Some(target.cwd.display().to_string()),
+                created_at,
+                last_shown_at: now,
+                last_hidden_at: None,
+                previous_focus: previous_focus.clone(),
+                viewer: None,
+            },
+        );
+        self.save()?;
+        let viewer = match self.show_or_friendly(&handle, &key) {
+            Ok(viewer) => viewer,
+            Err(err) => {
+                if let Some(record) = self.registry.scratchpads.get_mut(&key) {
+                    record.status = LifecycleStatus::Available;
+                }
+                self.save()?;
+                return Err(err);
+            }
+        };
+        self.record_viewer(&key, viewer);
+        self.rename_viewer_best_effort(&key, &title);
+        self.update_visible(&key, previous_focus);
+        self.save()?;
+        Ok(Output::Text(format!(
+            "opened daily note `{}` ({})",
+            target.date_str, target.source
+        )))
     }
 
     fn toggle(
@@ -124,9 +347,7 @@ impl<H: Herdr> ScratchApp<H> {
     ) -> anyhow::Result<Output> {
         let current = self.herdr.current_pane().ok();
         let target = self.target(name, current.as_ref())?;
-        if self.config.behavior.toggle_returns_to_previous
-            && self.store.viewer_is_active(&target.key)
-        {
+        if self.config.behavior.toggle_returns_to_previous && self.viewer_focused(&target.key) {
             return self.hide_by_target(target);
         }
         if self
@@ -160,10 +381,14 @@ impl<H: Herdr> ScratchApp<H> {
             anyhow::bail!("scratchpad `{}` has no live runtime", target.name);
         };
         self.ensure_live(handle)?;
-        if !self.store.viewer_is_active(&target.key) {
-            self.show_or_friendly(handle, &target.key, None)?;
+        if !self.viewer_active(&target.key) {
+            let viewer = self.show_or_friendly(handle, &target.key)?;
+            self.record_viewer(&target.key, viewer);
             self.ensure_path_sync(&target, host_cwd(current.as_ref(), &target).as_deref());
         }
+        let title = self.display_title(&record.name, record.launch_command.as_deref());
+        self.rename_viewer_best_effort(&target.key, &title);
+        self.viewer_focus(&target.key);
         self.update_visible(&target.key, current.map(FocusSnapshot::from));
         self.save()?;
         Ok(Output::Text(format!(
@@ -188,14 +413,13 @@ impl<H: Herdr> ScratchApp<H> {
             )));
         };
         if let Some(handle) = record.handle.as_ref() {
-            // Closing a stale handle is allowed to become a registry cleanup.
-            if self.store.viewer_is_active(&target.key) {
-                let _ = self.herdr.hide_handle(handle);
-            }
+            // Closing the backing runtime tears down the overlay viewer too,
+            // since the attach process exits when its terminal is gone.
             let _ = self.herdr.close_handle(handle);
         }
         record.status = LifecycleStatus::Closed;
         record.handle = None;
+        record.viewer = None;
         record.last_hidden_at = Some(now_rfc3339());
         self.registry.insert(target.key, record);
         self.save()?;
@@ -242,7 +466,7 @@ impl<H: Herdr> ScratchApp<H> {
             anyhow::bail!("scratchpad `{old}` does not exist");
         }
         for key in keys {
-            if self.store.viewer_is_active(&key) {
+            if self.viewer_active(&key) {
                 anyhow::bail!("hide scratchpad `{old}` before renaming it");
             }
             let mut record = self.registry.remove(&key).expect("key came from registry");
@@ -259,17 +483,6 @@ impl<H: Herdr> ScratchApp<H> {
         )))
     }
 
-    fn send(&mut self, name: &str, text: &str) -> anyhow::Result<Output> {
-        let current = self.herdr.current_pane().ok();
-        let target = self.target(Some(name), current.as_ref())?;
-        let handle = self.live_handle(&target)?;
-        self.herdr.send_text(&handle, text)?;
-        Ok(Output::Text(format!(
-            "sent text to scratchpad `{}`",
-            target.name
-        )))
-    }
-
     fn run_in_scratchpad(&mut self, name: &str, command: &str) -> anyhow::Result<Output> {
         let current = self.herdr.current_pane().ok();
         let target = self.target(Some(name), current.as_ref())?;
@@ -279,131 +492,6 @@ impl<H: Herdr> ScratchApp<H> {
             "ran command in scratchpad `{}`",
             target.name
         )))
-    }
-
-    fn resize(
-        &mut self,
-        direction: cli::ResizeDirection,
-        name: Option<&str>,
-    ) -> anyhow::Result<Output> {
-        let current = self.herdr.current_pane().ok();
-        let target = self.target(name, current.as_ref())?;
-        let mut record = self.live_record(&target)?;
-        let current_size = self.popup_size(&record)?;
-        let step = &self.config.behavior.resize_step;
-        let up = direction == cli::ResizeDirection::Up;
-        let size = PopupSize {
-            width: current_size.width.apply_step(step, up),
-            height: current_size.height.apply_step(step, up),
-        };
-        self.apply_popup_size(&target, &mut record, size)?;
-        Ok(Output::Text(format!(
-            "resized scratchpad `{}`",
-            target.name
-        )))
-    }
-
-    fn fullscreen(&mut self, name: Option<&str>) -> anyhow::Result<Output> {
-        let current = self.herdr.current_pane().ok();
-        let target = self.target(name, current.as_ref())?;
-        let mut record = self.live_record(&target)?;
-        let current_size = self.popup_size(&record)?;
-        let fullsize = self.config.behavior.fullscreen_size.clone();
-        let full_size = PopupSize {
-            width: fullsize.clone(),
-            height: fullsize,
-        };
-        let size = if current_size == full_size {
-            self.stored_previous_size(&record)
-                .unwrap_or_else(|| PopupSize {
-                    width: self.config.ui.popup.width.clone(),
-                    height: self.config.ui.popup.height.clone(),
-                })
-        } else {
-            self.store_previous_size(&mut record, &current_size);
-            full_size
-        };
-        self.apply_popup_size(&target, &mut record, size)?;
-        Ok(Output::Text(format!(
-            "toggled scratchpad `{}` fullscreen",
-            target.name
-        )))
-    }
-
-    fn reset(&mut self, name: Option<&str>) -> anyhow::Result<Output> {
-        let current = self.herdr.current_pane().ok();
-        let target = self.target(name, current.as_ref())?;
-        let mut record = self.live_record(&target)?;
-        let size = PopupSize {
-            width: self.config.ui.popup.width.clone(),
-            height: self.config.ui.popup.height.clone(),
-        };
-        self.apply_popup_size(&target, &mut record, size)?;
-        Ok(Output::Text(format!(
-            "reset scratchpad `{}` to its configured size",
-            target.name
-        )))
-    }
-
-    fn live_record(&self, target: &Target) -> anyhow::Result<ScratchpadRecord> {
-        let Some(record) = self.registry.scratchpads.get(&target.key).cloned() else {
-            anyhow::bail!("scratchpad `{}` is not open", target.name);
-        };
-        if record.handle.is_none() {
-            anyhow::bail!("scratchpad `{}` has no live runtime", target.name);
-        }
-        Ok(record)
-    }
-
-    fn popup_size(&self, record: &ScratchpadRecord) -> anyhow::Result<PopupSize> {
-        let Some(handle) = record.handle.as_ref() else {
-            anyhow::bail!("scratchpad has no live runtime");
-        };
-        if !handle.is_popup() {
-            anyhow::bail!("popup sizing applies to popup scratchpads only");
-        }
-        self.ensure_live(handle)?;
-        Ok(stored_popup_size(handle).unwrap_or_else(|| self.config.ui.popup.size()))
-    }
-
-    fn stored_previous_size(&self, record: &ScratchpadRecord) -> Option<PopupSize> {
-        stored_popup_size_key(record.handle.as_ref()?, "previous_size")
-    }
-
-    fn store_previous_size(&mut self, record: &mut ScratchpadRecord, size: &PopupSize) {
-        if let Some(handle) = record.handle.as_mut() {
-            handle
-                .opaque
-                .insert("previous_size".to_string(), popup_size_json(size));
-        }
-    }
-
-    fn apply_popup_size(
-        &mut self,
-        target: &Target,
-        record: &mut ScratchpadRecord,
-        size: PopupSize,
-    ) -> anyhow::Result<()> {
-        let Some(handle) = record.handle.as_ref() else {
-            anyhow::bail!("scratchpad has no live runtime");
-        };
-        if self.store.viewer_is_active(&target.key) {
-            self.herdr.hide_handle(handle)?;
-        }
-        self.show_or_friendly(handle, &target.key, Some(&size))?;
-
-        let mut handle = handle.clone();
-        handle
-            .opaque
-            .insert("size".to_string(), popup_size_json(&size));
-        record.handle = Some(handle);
-        let previous = self.herdr.current_pane().ok().map(FocusSnapshot::from);
-        record.status = LifecycleStatus::Visible;
-        record.last_shown_at = now_rfc3339();
-        record.previous_focus = previous;
-        self.registry.insert(target.key.clone(), record.clone());
-        self.save()?;
-        Ok(())
     }
 
     fn activate_or_open(
@@ -419,8 +507,11 @@ impl<H: Herdr> ScratchApp<H> {
             && let Some(handle) = record.handle.as_ref()
             && self.ensure_live(handle).is_ok()
         {
-            self.rename_handle_best_effort(handle, &self.title_for(&target.name));
-            if handle.is_popup() && self.store.viewer_is_active(&target.key) {
+            let title = self.display_title(&record.name, record.launch_command.as_deref());
+            self.rename_handle_best_effort(handle, &title);
+            if self.viewer_active(&target.key) {
+                self.rename_viewer_best_effort(&target.key, &title);
+                self.viewer_focus(&target.key);
                 self.update_visible(&target.key, previous.map(FocusSnapshot::from));
                 self.save()?;
                 return Ok(Output::Text(format!(
@@ -428,8 +519,11 @@ impl<H: Herdr> ScratchApp<H> {
                     target.name
                 )));
             }
-            self.show_or_friendly(handle, &target.key, None)?;
+            let viewer = self.show_or_friendly(handle, &target.key)?;
+            self.record_viewer(&target.key, viewer);
+            self.rename_viewer_best_effort(&target.key, &title);
             self.ensure_path_sync(&target, host_cwd.as_deref());
+            self.viewer_focus(&target.key);
             self.update_visible(&target.key, previous.map(FocusSnapshot::from));
             self.save()?;
             return Ok(Output::Text(format!("opened scratchpad `{}`", target.name)));
@@ -450,14 +544,20 @@ impl<H: Herdr> ScratchApp<H> {
         let key = target.key.clone();
         self.registry.insert(key.clone(), record);
         self.save()?;
-        if let Err(err) = self.show_or_friendly(&handle, &key, None) {
-            if let Some(record) = self.registry.scratchpads.get_mut(&key) {
-                record.status = LifecycleStatus::Available;
+        let viewer = match self.show_or_friendly(&handle, &key) {
+            Ok(viewer) => viewer,
+            Err(err) => {
+                if let Some(record) = self.registry.scratchpads.get_mut(&key) {
+                    record.status = LifecycleStatus::Available;
+                }
+                self.save()?;
+                return Err(err);
             }
-            self.save()?;
-            return Err(err);
-        }
+        };
         self.ensure_path_sync(&target, host_cwd.as_deref());
+        self.record_viewer(&key, viewer);
+        let title = self.display_title(&target.name, command.as_deref());
+        self.rename_viewer_best_effort(&key, &title);
         self.update_visible(&key, previous_focus);
         self.save()?;
         Ok(Output::Text(format!("opened scratchpad `{name}`")))
@@ -492,12 +592,15 @@ impl<H: Herdr> ScratchApp<H> {
         let handle = self.herdr.open_scratchpad(OpenScratchpadRequest {
             cwd: cwd.clone(),
             env,
-            title: self.title_for(&target.name),
+            title: self.display_title(&target.name, command_override),
             backing_session: self.config.runtime.backing_session.clone(),
             placement: self.config.behavior.placement,
             split_direction: self.config.behavior.split_direction,
         })?;
-        self.rename_handle_best_effort(&handle, &self.title_for(&target.name));
+        self.rename_handle_best_effort(
+            &handle,
+            &self.display_title(&target.name, command_override),
+        );
         let now = now_rfc3339();
         let stored_command = (!launch_command.is_empty()).then_some(launch_command);
         Ok(ScratchpadRecord {
@@ -515,6 +618,7 @@ impl<H: Herdr> ScratchApp<H> {
             last_shown_at: now,
             last_hidden_at: previous_record.and_then(|record| record.last_hidden_at),
             previous_focus,
+            viewer: None,
         })
     }
 
@@ -525,14 +629,11 @@ impl<H: Herdr> ScratchApp<H> {
                 target.name
             )));
         };
-        if let Some(handle) = record.handle.as_ref() {
-            if handle.is_popup() {
-                if self.store.viewer_is_active(&target.key) {
-                    self.herdr.hide_handle(handle)?;
-                }
-            } else if let Some(previous) = record.previous_focus.as_ref() {
-                let _ = self.herdr.focus_previous(previous);
-            }
+        // With the overlay viewer, hiding means returning focus to the context
+        // we were in before showing the scratchpad. The overlay pane stays
+        // alive so a later toggle can refocus it without reopening.
+        if let Some(previous) = record.previous_focus.as_ref() {
+            let _ = self.herdr.focus_previous(previous);
         }
         record.status = LifecycleStatus::Available;
         record.last_hidden_at = Some(now_rfc3339());
@@ -611,23 +712,52 @@ impl<H: Herdr> ScratchApp<H> {
     }
 
     /// Show a scratchpad, mapping a Herdr "popup already open" rejection to a
-    /// friendly hint before propagating any other error.
+    /// friendly hint before propagating any other error. Returns the overlay
+    /// viewer pane that is now showing the scratchpad, if it is an overlay.
     fn show_or_friendly(
         &self,
         handle: &RuntimeHandle,
         key: &str,
-        size: Option<&PopupSize>,
-    ) -> anyhow::Result<()> {
-        match self
-            .herdr
-            .show_handle(handle, key, &self.config.ui.popup, size)
-        {
-            Ok(()) => Ok(()),
+    ) -> anyhow::Result<Option<ViewerInfo>> {
+        if let Some(viewer) = self.alive_viewer(key) {
+            return Ok(Some(viewer));
+        }
+        match self.herdr.show_handle(handle, key) {
+            Ok(Some(pane)) => Ok(Some(viewer_from_pane(&pane))),
+            Ok(None) => Ok(None),
             Err(err) if err.is_popup_open() => Err(anyhow::anyhow!(
                 "another popup is already open; detach it with ctrl+b q and try again"
             )),
             Err(err) => Err(err.into()),
         }
+    }
+
+    /// Returns the recorded viewer pane if it is still alive.
+    fn alive_viewer(&self, key: &str) -> Option<ViewerInfo> {
+        let viewer = self.registry.scratchpads.get(key)?.viewer.clone()?;
+        if self.herdr.handle_get(&handle_from_viewer(&viewer)).is_ok() {
+            Some(viewer)
+        } else {
+            None
+        }
+    }
+
+    /// True when the overlay viewer pane for `key` is alive and is currently
+    /// the focused pane (i.e. the scratchpad is on screen).
+    fn viewer_focused(&self, key: &str) -> bool {
+        let Some(viewer) = self.alive_viewer(key) else {
+            return false;
+        };
+        self.herdr
+            .current_pane()
+            .ok()
+            .is_some_and(|pane| pane.pane_id == viewer.pane_id)
+    }
+
+    /// True when the overlay viewer pane for `key` is alive, regardless of
+    /// whether it currently has focus.
+    fn viewer_active(&self, key: &str) -> bool {
+        self.alive_viewer(key).is_some()
     }
 
     fn update_visible(&mut self, key: &str, previous: Option<FocusSnapshot>) {
@@ -638,6 +768,20 @@ impl<H: Herdr> ScratchApp<H> {
         }
     }
 
+    fn record_viewer(&mut self, key: &str, viewer: Option<ViewerInfo>) {
+        if let Some(record) = self.registry.scratchpads.get_mut(key) {
+            record.viewer = viewer;
+        }
+    }
+
+    /// Give focus to the alive overlay viewer pane for `key`, if one exists.
+    fn viewer_focus(&self, key: &str) {
+        let Some(viewer) = self.alive_viewer(key) else {
+            return;
+        };
+        let _ = self.herdr.focus_pane(&viewer.pane_id);
+    }
+
     fn title_for(&self, name: &str) -> String {
         let title = self.config.ui.title_template.replace("{name}", name);
         let title = title.trim();
@@ -646,6 +790,35 @@ impl<H: Herdr> ScratchApp<H> {
         } else {
             title.to_string()
         }
+    }
+
+    /// Display title for a scratchpad. Follows the configured template,
+    /// except a one-shot command on the default scratchpad shows the
+    /// command's basename (`toggle -- lazygit` -> `Scratchpad:lazygit`
+    /// instead of `Scratchpad:scratch`).
+    fn display_title(&self, name: &str, launch: Option<&[String]>) -> String {
+        if name == self.config.default_scratchpad
+            && let Some(command) = launch.and_then(|args| args.first())
+        {
+            let base = command.rsplit('/').next().unwrap_or(command).trim();
+            if !base.is_empty() {
+                return self.title_for(base);
+            }
+        }
+        self.title_for(name)
+    }
+
+    fn daily_title(date_str: &str) -> String {
+        format!("daily:{date_str}")
+    }
+
+    /// Rename the visible overlay viewer pane, when one is alive.
+    /// Best-effort: a failed rename never breaks the open/focus flow.
+    fn rename_viewer_best_effort(&self, key: &str, title: &str) {
+        let Some(viewer) = self.alive_viewer(key) else {
+            return;
+        };
+        self.rename_handle_best_effort(&handle_from_viewer(&viewer), title);
     }
 
     fn rename_handle_best_effort(&self, handle: &RuntimeHandle, title: &str) {
@@ -682,7 +855,7 @@ impl<H: Herdr> ScratchApp<H> {
         let next = if self.ensure_live(&handle).is_err() {
             LifecycleStatus::Stale
         } else if handle.is_popup() {
-            if self.store.viewer_is_active(key) {
+            if self.viewer_active(key) {
                 LifecycleStatus::Visible
             } else {
                 LifecycleStatus::Available
@@ -703,10 +876,6 @@ impl<H: Herdr> ScratchApp<H> {
         let mut summary = summary_for(record);
         if let Some(handle) = record.handle.as_ref() {
             summary.surface = handle.surface().map(str::to_string);
-            if handle.is_popup() {
-                let size = stored_popup_size(handle).unwrap_or_else(|| self.config.ui.popup.size());
-                summary.size = Some(format!("{}x{}", size.width.as_arg(), size.height.as_arg()));
-            }
         }
         if record.handle.as_ref().is_some_and(RuntimeHandle::is_popup) {
             summary.status = if matches!(
@@ -714,7 +883,7 @@ impl<H: Herdr> ScratchApp<H> {
                 LifecycleStatus::Stale | LifecycleStatus::Error
             ) {
                 record.status.to_string()
-            } else if self.store.viewer_is_active(key) {
+            } else if self.viewer_active(key) {
                 LifecycleStatus::Visible.to_string()
             } else if record.handle.is_some() {
                 LifecycleStatus::Available.to_string()
@@ -756,7 +925,7 @@ impl<H: Herdr> ScratchApp<H> {
                     0
                 } else {
                     issues.push(format!(
-                        "{} recommended keybinding(s) are not configured; run `herdr-scratch setup`",
+                        "{} recommended keybinding(s) are not configured; add them to the Herdr config (see README) and run `herdr server reload-config`",
                         pending.len()
                     ));
                     pending.len()
@@ -764,11 +933,36 @@ impl<H: Herdr> ScratchApp<H> {
             }
             Err(err) => {
                 issues.push(format!(
-                    "could not read the Herdr config for setup: {err:#}"
+                    "could not read the Herdr config for keybindings: {err:#}"
                 ));
                 0
             }
         };
+        let (notes_source, notes_file) = match self.probe_daily_target() {
+            Ok((source, file)) => (source.to_string(), Some(file)),
+            Err(err) => {
+                issues.push(format!("daily notes: {err:#}"));
+                ("error".to_string(), None)
+            }
+        };
+        if notes_source == NotesSource::Fallback.to_string() {
+            issues.push(
+                "no Obsidian vault detected; daily notes use a local fallback file (set `notes.vault_path` or open a vault in Obsidian)".to_string(),
+            );
+        }
+        if let Some(template) = self
+            .config
+            .notes
+            .template_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            && !Path::new(template).exists()
+        {
+            issues.push(format!(
+                "notes template `{template}` does not exist; daily notes use the builtin skeleton"
+            ));
+        }
         DoctorReport {
             herdr_available,
             herdr_version,
@@ -779,26 +973,23 @@ impl<H: Herdr> ScratchApp<H> {
             state_path: self.paths.registry_file.display().to_string(),
             scratchpad_count: self.registry.scratchpads.len(),
             keybinding_missing,
+            notes_source,
+            notes_file,
             issues,
         }
     }
 
-    fn save(&self) -> anyhow::Result<()> {
-        self.store.save(&self.registry)
+    /// Best-effort daily resolution for `doctor` (never creates files).
+    fn probe_daily_target(&self) -> anyhow::Result<(NotesSource, String)> {
+        let today = time::OffsetDateTime::now_local()
+            .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+            .date();
+        let target = self.resolve_daily_target(None, today)?;
+        Ok((target.source, target.file.display().to_string()))
     }
 
-    fn setup(&mut self) -> anyhow::Result<Output> {
-        let path = herdr_config_path();
-        let (added, skipped) = write_keybindings(&path)?;
-        if added == 0 {
-            return Ok(Output::Text(
-                "keybindings are already configured for herdr-scratch".to_string(),
-            ));
-        }
-        Ok(Output::Text(format!(
-            "wrote {added} recommended keybinding(s) to {}\n({skipped} already configured)\nreload Herdr with: herdr server reload-config",
-            path.display()
-        )))
+    fn save(&self) -> anyhow::Result<()> {
+        self.store.save(&self.registry)
     }
 
     fn config_command(&mut self, args: cli::ConfigArgs) -> anyhow::Result<Output> {
@@ -883,9 +1074,6 @@ pub fn run_popup_attach(paths: Paths) -> anyhow::Result<()> {
     let terminal_id = required_env("HERDR_SCRATCH_TERMINAL_ID")?;
     let key = required_env("HERDR_SCRATCH_REGISTRY_KEY")?;
     let store = RegistryStore::new(paths.registry_file.clone());
-    let _viewer_lease = store.viewer_lease(&key)?;
-
-    update_attach_status(&store, &key, LifecycleStatus::Visible, false)?;
     let herdr = HerdrCli::discover();
     let attach_result = herdr.attach_terminal(&session, &terminal_id);
 
@@ -895,58 +1083,10 @@ pub fn run_popup_attach(paths: Paths) -> anyhow::Result<()> {
         .and_then(|registry| registry.scratchpads.get(&key).cloned())
         .and_then(|record| record.handle)
         .is_some_and(|handle| herdr.handle_get(&handle).is_ok());
-    update_attach_status(
-        &store,
-        &key,
-        if live {
-            LifecycleStatus::Available
-        } else {
-            LifecycleStatus::Closed
-        },
-        !live,
-    )?;
+    if !live {
+        update_attach_status(&store, &key, LifecycleStatus::Closed, !live)?;
+    }
     attach_result?;
-    Ok(())
-}
-
-const GUIDE_TEXT: &str = r#"
-Scratch is ready
-================
-
-1. Open or hide your persistent scratchpad:
-   herdr plugin action invoke toggle --plugin herdr.scratch
-
-2. While the popup has focus, press ctrl+b q to hide it.
-   The terminal keeps running in the background.
-
-3. Run the toggle action again to bring it back.
-
-Recommended keybinding (~/.config/herdr/config.toml):
-
-   [[keys.command]]
-   key = "prefix+p"
-   type = "plugin_action"
-   command = "herdr.scratch.toggle"
-   description = "toggle scratchpad"
-
-Then run: herdr server reload-config
-
-Or let the plugin write the recommended bindings:
-   herdr-scratch setup
-
-Diagnostics: herdr plugin action invoke doctor --plugin herdr.scratch
-Docs: https://github.com/AkashJana18/herdr-scratch
-
-Press Enter to close this guide. You can also press ctrl+b q.
-"#;
-
-pub fn run_guide_pane() -> anyhow::Result<()> {
-    use std::io::{self, Write};
-
-    print!("{GUIDE_TEXT}");
-    io::stdout().flush()?;
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
     Ok(())
 }
 
@@ -1147,32 +1287,18 @@ fn shell_quote(path: &str) -> String {
     quoted
 }
 
-/// Recommended Herdr keybindings written by `setup`: (key, action, description).
+/// Recommended Herdr keybindings (key, action, description), also listed in
+/// the README for manual config. `doctor` reports how many are missing.
 const RECOMMENDED_KEYS: &[(&str, &str, &str)] = &[
     ("prefix+p", "herdr.scratch.toggle", "toggle scratchpad"),
     ("prefix+shift+p", "herdr.scratch.list", "list scratchpads"),
     (
-        "prefix+g",
+        "prefix+shift+g",
         "herdr.scratch.lazygit",
         "toggle lazygit scratchpad",
     ),
     ("prefix+n", "herdr.scratch.notes", "toggle notes scratchpad"),
-    ("prefix+=", "herdr.scratch.size-up", "grow popup scratchpad"),
-    (
-        "prefix+-",
-        "herdr.scratch.size-down",
-        "shrink popup scratchpad",
-    ),
-    (
-        "prefix+f",
-        "herdr.scratch.fullscreen",
-        "toggle popup fullscreen",
-    ),
-    (
-        "prefix+r",
-        "herdr.scratch.reset",
-        "reset popup scratchpad size",
-    ),
+    ("prefix+d", "herdr.scratch.daily", "open daily note"),
 ];
 
 fn herdr_config_path() -> PathBuf {
@@ -1205,30 +1331,19 @@ fn bound_actions(value: &toml::Value) -> HashSet<String> {
         .collect()
 }
 
-/// Keys already bound to any action, so `setup` never steals a user's keys.
+/// Keys already bound to any action, so recommended keys never collide.
+/// Every `[[keys.*]]` chord table counts (command, goto, session, tab, ...).
 fn taken_keys(value: &toml::Value) -> HashSet<String> {
     value
         .get("keys")
-        .and_then(|keys| keys.get("command"))
-        .and_then(toml::Value::as_array)
+        .and_then(toml::Value::as_table)
         .into_iter()
+        .flat_map(|keys| keys.values())
+        .filter_map(toml::Value::as_array)
         .flatten()
         .filter_map(|entry| entry.get("key").and_then(toml::Value::as_str))
         .map(str::to_string)
         .collect()
-}
-
-fn recommended_block(bindings: &[(&str, &str, &str)]) -> String {
-    let mut out = String::new();
-    out.push_str("# Added by herdr-scratch setup\n");
-    for (key, action, description) in bindings {
-        out.push_str("[[keys.command]]\n");
-        out.push_str(&format!("key = {key:?}\n"));
-        out.push_str("type = \"plugin_action\"\n");
-        out.push_str(&format!("command = {action:?}\n"));
-        out.push_str(&format!("description = {description:?}\n"));
-    }
-    out
 }
 
 /// Recommended bindings from `RECOMMENDED_KEYS` that are NOT yet present in
@@ -1257,50 +1372,27 @@ fn pending_keybindings(
         .collect())
 }
 
-/// Idempotently append the recommended `[[keys.command]]` bindings to a Herdr
-/// config file. Returns the number added and the number skipped.
-fn write_keybindings(path: &std::path::Path) -> anyhow::Result<(usize, usize)> {
-    let pending = pending_keybindings(path)?;
-    let added = pending.len();
-    let skipped = RECOMMENDED_KEYS.len() - added;
-    if added == 0 {
-        return Ok((0, skipped));
+/// A minimal handle describing the overlay viewer pane, used to probe liveness.
+fn handle_from_viewer(viewer: &ViewerInfo) -> RuntimeHandle {
+    RuntimeHandle {
+        kind: "herdr_pane".to_string(),
+        pane_id: Some(viewer.pane_id.clone()),
+        terminal_id: Some(viewer.terminal_id.clone()),
+        workspace_id: Some(viewer.workspace_id.clone()),
+        session: None,
+        opaque: Default::default(),
     }
-    let content = if path.exists() {
-        std::fs::read_to_string(path)?
-    } else {
-        String::new()
-    };
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut block = recommended_block(&pending);
-    if !content.is_empty() {
-        if !content.ends_with('\n') {
-            block.insert(0, '\n');
-        }
-        block.insert(0, '\n');
-    }
-    std::fs::write(path, format!("{content}{block}"))?;
-    Ok((added, skipped))
 }
 
-fn popup_size_json(size: &PopupSize) -> serde_json::Value {
-    serde_json::json!({
-        "width": size.width.as_arg(),
-        "height": size.height.as_arg(),
-    })
-}
-
-fn stored_popup_size(handle: &RuntimeHandle) -> Option<PopupSize> {
-    stored_popup_size_key(handle, "size")
-}
-
-fn stored_popup_size_key(handle: &RuntimeHandle, key: &str) -> Option<PopupSize> {
-    let value = handle.opaque.get(key)?;
-    let width = PopupDimension::parse_str(value.get("width")?.as_str()?)?;
-    let height = PopupDimension::parse_str(value.get("height")?.as_str()?)?;
-    Some(PopupSize { width, height })
+/// Records the pane Herdr opened for the overlay viewer.
+fn viewer_from_pane(pane: &crate::herdr::PaneInfo) -> ViewerInfo {
+    ViewerInfo {
+        pane_id: pane.pane_id.clone(),
+        workspace_id: pane.workspace_id.clone(),
+        tab_id: pane.tab_id.clone(),
+        terminal_id: pane.terminal_id.clone(),
+        focus_token: pane.tab_id.clone(),
+    }
 }
 
 fn parse_scope(raw: Option<&str>) -> anyhow::Result<ScopeKind> {
@@ -1310,6 +1402,37 @@ fn parse_scope(raw: Option<&str>) -> anyhow::Result<ScopeKind> {
         "cwd" => Ok(ScopeKind::Cwd),
         other => anyhow::bail!("invalid scope `{other}`; expected global, workspace, or cwd"),
     }
+}
+
+/// Parse `--date YYYY-MM-DD`, defaulting to today (local, else UTC).
+fn parse_daily_date(raw: Option<&str>) -> anyhow::Result<time::Date> {
+    let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(time::OffsetDateTime::now_local()
+            .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+            .date());
+    };
+    let mut parts = raw.split('-');
+    let invalid = || anyhow::anyhow!("invalid --date `{raw}`; expected YYYY-MM-DD");
+    let year: i32 = parts
+        .next()
+        .ok_or_else(invalid)?
+        .parse()
+        .map_err(|_| invalid())?;
+    let month_num: u8 = parts
+        .next()
+        .ok_or_else(invalid)?
+        .parse()
+        .map_err(|_| invalid())?;
+    let day: u8 = parts
+        .next()
+        .ok_or_else(invalid)?
+        .parse()
+        .map_err(|_| invalid())?;
+    if parts.next().is_some() {
+        return Err(invalid());
+    }
+    let month = time::Month::try_from(month_num).map_err(|_| invalid())?;
+    time::Date::from_calendar_date(year, month, day).map_err(|_| invalid())
 }
 
 fn parse_cwd(raw: Option<&str>) -> CwdMode {
@@ -1377,7 +1500,6 @@ fn display_path(path: Option<PathBuf>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::PopupConfig;
     use crate::herdr::{HerdrError, PaneInfo, TabInfo};
     use std::{cell::RefCell, rc::Rc};
 
@@ -1387,7 +1509,13 @@ mod tests {
         fail_show: bool,
         popup_busy: bool,
         backing_cwd: Option<String>,
+        /// The pane the fake reports as currently focused (defaults to w1:p1).
+        focused_pane: Option<String>,
+        /// When set, `handle_get` reports the pane as gone.
+        handle_gone: bool,
     }
+
+    const FAKE_VIEWER_PANE: &str = "w9:p9";
 
     impl Herdr for FakeHerdr {
         fn available(&self) -> bool {
@@ -1404,18 +1532,16 @@ mod tests {
 
         fn current_pane(&self) -> Result<PaneInfo, HerdrError> {
             Ok(PaneInfo {
-                pane_id: "w1:p1".to_string(),
+                pane_id: self
+                    .focused_pane
+                    .clone()
+                    .unwrap_or_else(|| "w1:p1".to_string()),
                 terminal_id: "term-1".to_string(),
                 workspace_id: "w1".to_string(),
                 tab_id: "w1:t1".to_string(),
                 focused: true,
                 cwd: Some("/repo".to_string()),
             })
-        }
-
-        fn open_guide(&self) -> Result<(), HerdrError> {
-            self.calls.borrow_mut().push("open:guide".to_string());
-            Ok(())
         }
 
         fn tab_get(&self, tab_id: &str) -> Result<TabInfo, HerdrError> {
@@ -1427,11 +1553,14 @@ mod tests {
         }
 
         fn handle_get(&self, handle: &RuntimeHandle) -> Result<PaneInfo, HerdrError> {
+            if self.handle_gone {
+                return Err(HerdrError::Unsupported("pane gone".to_string()));
+            }
             Ok(PaneInfo {
                 pane_id: handle.pane_id.clone().unwrap(),
                 terminal_id: handle.terminal_id.clone().unwrap(),
                 workspace_id: handle.workspace_id.clone().unwrap(),
-                tab_id: handle.focus_token().unwrap().to_string(),
+                tab_id: handle.focus_token().unwrap_or("w1:t1").to_string(),
                 focused: false,
                 cwd: Some(
                     self.backing_cwd
@@ -1445,17 +1574,8 @@ mod tests {
             &self,
             _handle: &RuntimeHandle,
             registry_key: &str,
-            _popup: &PopupConfig,
-            size: Option<&PopupSize>,
-        ) -> Result<(), HerdrError> {
-            match size {
-                Some(size) => self.calls.borrow_mut().push(format!(
-                    "show:{registry_key}:{}x{}",
-                    size.width.as_arg(),
-                    size.height.as_arg()
-                )),
-                None => self.calls.borrow_mut().push(format!("show:{registry_key}")),
-            }
+        ) -> Result<Option<PaneInfo>, HerdrError> {
+            self.calls.borrow_mut().push(format!("show:{registry_key}"));
             if self.fail_show {
                 Err(HerdrError::Unsupported("popup already open".to_string()))
             } else if self.popup_busy {
@@ -1463,12 +1583,18 @@ mod tests {
                     "error": { "message": "another popup is already open" }
                 })))
             } else {
-                Ok(())
+                Ok(Some(PaneInfo {
+                    pane_id: FAKE_VIEWER_PANE.to_string(),
+                    terminal_id: "term-viewer".to_string(),
+                    workspace_id: "w9".to_string(),
+                    tab_id: "w9:t1".to_string(),
+                    focused: true,
+                    cwd: Some("/repo".to_string()),
+                }))
             }
         }
 
-        fn hide_handle(&self, _handle: &RuntimeHandle) -> Result<(), HerdrError> {
-            self.calls.borrow_mut().push("hide".to_string());
+        fn focus_pane(&self, _pane_id: &str) -> Result<(), HerdrError> {
             Ok(())
         }
 
@@ -1502,17 +1628,16 @@ mod tests {
             })
         }
 
-        fn rename_handle(&self, _handle: &RuntimeHandle, _title: &str) -> Result<(), HerdrError> {
+        fn rename_handle(&self, handle: &RuntimeHandle, title: &str) -> Result<(), HerdrError> {
+            self.calls.borrow_mut().push(format!(
+                "rename:{}:{title}",
+                handle.pane_id.as_deref().unwrap_or("?")
+            ));
             Ok(())
         }
 
         fn close_handle(&self, _handle: &RuntimeHandle) -> Result<(), HerdrError> {
             self.calls.borrow_mut().push("close".to_string());
-            Ok(())
-        }
-
-        fn send_text(&self, _handle: &RuntimeHandle, text: &str) -> Result<(), HerdrError> {
-            self.calls.borrow_mut().push(format!("send:{text}"));
             Ok(())
         }
 
@@ -1600,27 +1725,6 @@ mod tests {
     }
 
     #[test]
-    fn guide_opens_visible_popup() {
-        let fake = FakeHerdr::default();
-        let calls = fake.calls.clone();
-        let (_dir, mut app) = app_with_fake(fake);
-
-        let output = app.handle(cli::Command::Guide).unwrap();
-
-        assert!(matches!(output, Output::Text(text) if text == "opened Scratch quick start"));
-        assert_eq!(calls.borrow().as_slice(), ["open:guide"]);
-    }
-
-    #[test]
-    fn guide_covers_the_first_run_workflow() {
-        assert!(GUIDE_TEXT.contains("action invoke toggle"));
-        assert!(GUIDE_TEXT.contains("ctrl+b q"));
-        assert!(GUIDE_TEXT.contains("herdr.scratch.toggle"));
-        assert!(GUIDE_TEXT.contains("server reload-config"));
-        assert!(GUIDE_TEXT.contains("action invoke doctor"));
-    }
-
-    #[test]
     fn first_toggle_creates_backing_runtime_then_shows_popup() {
         let fake = FakeHerdr::default();
         let calls = fake.calls.clone();
@@ -1638,7 +1742,12 @@ mod tests {
         );
         assert_eq!(
             calls.borrow().clone(),
-            vec!["open:popup".to_string(), format!("show:{key}")]
+            vec![
+                "open:popup".to_string(),
+                "rename:w9:p1:Scratchpad:scratch".to_string(),
+                format!("show:{key}"),
+                "rename:w9:p9:Scratchpad:scratch".to_string(),
+            ]
         );
     }
 
@@ -1658,17 +1767,17 @@ mod tests {
     }
 
     #[test]
-    fn toggle_hides_popup_when_viewer_lease_is_active() {
-        let fake = FakeHerdr::default();
-        let calls = fake.calls.clone();
+    fn toggle_hides_overlay_when_viewer_pane_is_focused() {
+        let fake = FakeHerdr {
+            focused_pane: Some(FAKE_VIEWER_PANE.to_string()),
+            ..FakeHerdr::default()
+        };
         let (_dir, mut app) = app_with_fake(fake);
         app.toggle(None, None).unwrap();
         let key = app.registry.scratchpads.keys().next().unwrap().clone();
-        let _lease = app.store.viewer_lease(&key).unwrap();
+        assert!(app.registry.scratchpads.get(&key).unwrap().viewer.is_some());
 
         app.toggle(None, None).unwrap();
-
-        assert!(calls.borrow().iter().any(|call| call == "hide"));
         assert_eq!(
             app.registry.scratchpads.get(&key).unwrap().status,
             LifecycleStatus::Available
@@ -1676,95 +1785,34 @@ mod tests {
     }
 
     #[test]
-    fn resize_steps_a_popup_and_persists_the_size() {
+    fn toggle_from_outside_refocuses_an_alive_viewer_without_reopening() {
         let fake = FakeHerdr::default();
         let calls = fake.calls.clone();
         let (_dir, mut app) = app_with_fake(fake);
         app.toggle(None, None).unwrap();
         let key = app.registry.scratchpads.keys().next().unwrap().clone();
+        let show_count = calls.borrow().iter().filter(|c| *c == "show").count();
 
-        app.handle(cli::Command::Resize(cli::ResizeArgs {
-            direction: cli::ResizeDirection::Up,
-            name: None,
-        }))
-        .unwrap();
+        let record = app.registry.scratchpads.get(&key).unwrap().clone();
+        assert_eq!(record.status, LifecycleStatus::Visible);
 
-        let record = app.registry.scratchpads.get(&key).unwrap();
-        let size = stored_popup_size(record.handle.as_ref().unwrap()).unwrap();
-        assert_eq!(size.width.as_arg(), "85%");
-        assert_eq!(size.height.as_arg(), "85%");
-        assert!(calls.borrow().contains(&format!("show:{key}:85%x85%")));
-
-        app.handle(cli::Command::Resize(cli::ResizeArgs {
-            direction: cli::ResizeDirection::Down,
-            name: None,
-        }))
-        .unwrap();
-        let size = stored_popup_size(
-            app.registry
-                .scratchpads
-                .get(&key)
-                .unwrap()
-                .handle
-                .as_ref()
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(size.width.as_arg(), "80%");
-        assert_eq!(size.height.as_arg(), "80%");
+        app.toggle(None, None).unwrap();
+        let new_show_count = calls.borrow().iter().filter(|c| *c == "show").count();
+        assert_eq!(new_show_count, show_count);
     }
 
     #[test]
-    fn fullscreen_toggles_and_restores_the_previous_size() {
-        let fake = FakeHerdr::default();
-        let calls = fake.calls.clone();
-        let (_dir, mut app) = app_with_fake(fake);
-        app.toggle(None, None).unwrap();
-
-        app.handle(cli::Command::Resize(cli::ResizeArgs {
-            direction: cli::ResizeDirection::Down,
-            name: None,
-        }))
-        .unwrap();
-        let key = app.registry.scratchpads.keys().next().unwrap().clone();
-
-        app.handle(cli::Command::Fullscreen(cli::NameArg { name: None }))
-            .unwrap();
-        let record = app.registry.scratchpads.get(&key).unwrap();
-        let size = stored_popup_size(record.handle.as_ref().unwrap()).unwrap();
-        assert_eq!(size.width.as_arg(), "100%");
-        assert_eq!(size.height.as_arg(), "100%");
-        assert!(calls.borrow().contains(&format!("show:{key}:100%x100%")));
-
-        app.handle(cli::Command::Fullscreen(cli::NameArg { name: None }))
-            .unwrap();
-        let record = app.registry.scratchpads.get(&key).unwrap();
-        let size = stored_popup_size(record.handle.as_ref().unwrap()).unwrap();
-        assert_eq!(size.width.as_arg(), "75%");
-        assert_eq!(size.height.as_arg(), "75%");
-    }
-
-    #[test]
-    fn reset_returns_a_popup_to_its_configured_size() {
-        let fake = FakeHerdr::default();
-        let calls = fake.calls.clone();
+    fn refresh_marks_overlay_available_when_viewer_pane_is_gone() {
+        let fake = FakeHerdr {
+            handle_gone: true,
+            ..FakeHerdr::default()
+        };
         let (_dir, mut app) = app_with_fake(fake);
         app.toggle(None, None).unwrap();
         let key = app.registry.scratchpads.keys().next().unwrap().clone();
-
-        app.handle(cli::Command::Resize(cli::ResizeArgs {
-            direction: cli::ResizeDirection::Up,
-            name: None,
-        }))
-        .unwrap();
-        app.handle(cli::Command::Reset(cli::NameArg { name: None }))
-            .unwrap();
-
+        app.refresh_status(&key).unwrap();
         let record = app.registry.scratchpads.get(&key).unwrap();
-        let size = stored_popup_size(record.handle.as_ref().unwrap()).unwrap();
-        assert_eq!(size.width.as_arg(), "80%");
-        assert_eq!(size.height.as_arg(), "80%");
-        assert!(calls.borrow().contains(&format!("show:{key}:80%x80%")));
+        assert_eq!(record.status, LifecycleStatus::Stale);
     }
 
     #[test]
@@ -1792,6 +1840,7 @@ mod tests {
             last_shown_at: now_rfc3339(),
             last_hidden_at: None,
             previous_focus: None,
+            viewer: None,
         };
         assert!(bare_shell(&config, &bare_record));
 
@@ -1906,92 +1955,6 @@ mod tests {
     }
 
     #[test]
-    fn setup_writes_recommended_keybindings_idempotently() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("herdr/config.toml");
-
-        let (added, skipped) = write_keybindings(&path).unwrap();
-        assert_eq!(added, RECOMMENDED_KEYS.len());
-        assert_eq!(skipped, 0);
-
-        let content = std::fs::read_to_string(&path).unwrap();
-        for (key, action, description) in RECOMMENDED_KEYS {
-            assert!(content.contains(&format!("key = {key:?}")));
-            assert!(content.contains(&format!("command = {action:?}")));
-            assert!(content.contains(&format!("description = {description:?}")));
-        }
-
-        let (added_again, skipped_again) = write_keybindings(&path).unwrap();
-        assert_eq!(added_again, 0);
-        assert_eq!(skipped_again, RECOMMENDED_KEYS.len());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
-    }
-
-    #[test]
-    fn setup_preserves_config_and_skips_conflicting_bindings() {
-        let dir = tempfile::tempdir().unwrap();
-        let herdr_dir = dir.path().join("herdr");
-        std::fs::create_dir_all(&herdr_dir).unwrap();
-        let path = herdr_dir.join("config.toml");
-        std::fs::write(
-            &path,
-            r#"
-# existing user config
-[[keys.command]]
-key = "prefix+p"
-type = "plugin_action"
-command = "herdr.scratch.toggle"
-description = "mine"
-
-[[keys.command]]
-key = "prefix+z"
-type = "builtin"
-command = "unrelated"
-"#,
-        )
-        .unwrap();
-
-        let (added, skipped) = write_keybindings(&path).unwrap();
-        assert_eq!(added, RECOMMENDED_KEYS.len() - 1);
-        assert_eq!(skipped, 1);
-
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.starts_with("\n# existing user config"));
-        assert!(content.contains("# Added by herdr-scratch setup"));
-        assert_eq!(content.matches("key = \"prefix+p\"").count(), 1);
-    }
-
-    #[test]
-    fn setup_appends_cleanly_to_a_file_without_a_trailing_newline() {
-        let dir = tempfile::tempdir().unwrap();
-        let herdr_dir = dir.path().join("herdr");
-        std::fs::create_dir_all(&herdr_dir).unwrap();
-        let path = herdr_dir.join("config.toml");
-        std::fs::write(&path, "[keys]").unwrap();
-
-        let (added, _) = write_keybindings(&path).unwrap();
-        assert_eq!(added, RECOMMENDED_KEYS.len());
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.starts_with("[keys]\n"));
-        assert!(content.contains("# Added by herdr-scratch setup"));
-    }
-
-    #[test]
-    fn setup_rejects_malformed_config_without_touching_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let herdr_dir = dir.path().join("herdr");
-        std::fs::create_dir_all(&herdr_dir).unwrap();
-        let path = herdr_dir.join("config.toml");
-        std::fs::write(&path, "not a valid toml [[").unwrap();
-
-        assert!(write_keybindings(&path).is_err());
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "not a valid toml [["
-        );
-    }
-
-    #[test]
     fn popup_busy_show_maps_to_a_friendly_hint() {
         let fake = FakeHerdr {
             popup_busy: true,
@@ -2027,8 +1990,16 @@ command = "unrelated"
     fn doctor_reports_server_and_keybinding_status() {
         let fake = FakeHerdr::default();
         let (_dir, app) = app_with_fake(fake);
-
+        let config_dir = tempfile::tempdir().unwrap();
+        let config_path = config_dir.path().join("config.toml");
+        std::fs::write(&config_path, "").unwrap();
+        unsafe {
+            std::env::set_var("HERDR_CONFIG_FILE", &config_path);
+        }
         let report = app.doctor();
+        unsafe {
+            std::env::remove_var("HERDR_CONFIG_FILE");
+        }
 
         assert!(report.server_ok);
         assert_eq!(report.keybinding_missing, RECOMMENDED_KEYS.len());
@@ -2036,12 +2007,12 @@ command = "unrelated"
             report
                 .issues
                 .iter()
-                .any(|issue| issue.contains("herdr-scratch setup"))
+                .any(|issue| issue.contains("server reload-config"))
         );
     }
 
     #[test]
-    fn summary_reports_surface_and_popup_size() {
+    fn summary_reports_surface_and_status() {
         let fake = FakeHerdr::default();
         let (_dir, mut app) = app_with_fake(fake);
         app.toggle(None, None).unwrap();
@@ -2050,16 +2021,300 @@ command = "unrelated"
         let record = app.registry.scratchpads.get(&key).unwrap().clone();
         let summary = app.summary_for_key(&key, &record);
         assert_eq!(summary.surface.as_deref(), Some("popup"));
-        assert_eq!(summary.size.as_deref(), Some("80%x80%"));
+        assert_eq!(summary.size, None);
+        assert_eq!(summary.status, "visible");
 
-        app.handle(cli::Command::Resize(cli::ResizeArgs {
-            direction: cli::ResizeDirection::Up,
-            name: None,
-        }))
+        // Once the viewer pane is gone the summary reports the scratchpad as
+        // available rather than visible.
+        let fake2 = FakeHerdr {
+            handle_gone: true,
+            ..FakeHerdr::default()
+        };
+        let (_dir2, mut app2) = app_with_fake(fake2);
+        app2.toggle(None, None).unwrap();
+        let key2 = app2.registry.scratchpads.keys().next().unwrap().clone();
+        let record = app2.registry.scratchpads.get(&key2).unwrap().clone();
+        let summary = app2.summary_for_key(&key2, &record);
+        assert_eq!(summary.status, "available");
+    }
+
+    fn daily_config(vault: Option<&std::path::Path>) -> Config {
+        let mut config = Config::default();
+        config.notes.vault_path = vault.map(|v| v.display().to_string());
+        config.notes.vault_auto = false;
+        config.notes.editor = Some("nvim".to_string());
+        config
+    }
+
+    fn daily_args(date: &str) -> cli::DailyArgs {
+        cli::DailyArgs {
+            vault: None,
+            print_path: false,
+            date: Some(date.to_string()),
+        }
+    }
+
+    #[test]
+    fn daily_opens_vault_note_with_editor_and_template_defaults() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join(".obsidian")).unwrap();
+        std::fs::write(
+            vault.path().join(".obsidian").join("daily-notes.json"),
+            r#"{"folder":"Daily","format":"YYYY-MM-DD"}"#,
+        )
         .unwrap();
-        let record = app.registry.scratchpads.get(&key).unwrap().clone();
-        let summary = app.summary_for_key(&key, &record);
-        assert_eq!(summary.surface.as_deref(), Some("popup"));
-        assert_eq!(summary.size.as_deref(), Some("85%x85%"));
+        let (_dir, mut app) =
+            app_with_config(FakeHerdr::default(), daily_config(Some(vault.path())));
+
+        let output = app.daily(&daily_args("2026-09-20")).unwrap();
+
+        let expected = vault.path().join("Daily").join("2026-09-20.md");
+        assert!(expected.is_file());
+        let content = std::fs::read_to_string(&expected).unwrap();
+        assert!(content.contains("# 2026-09-20"));
+        assert!(
+            matches!(output, Output::Text(text) if text.contains("2026-09-20") && text.contains("explicit"))
+        );
+        let record = app
+            .registry
+            .scratchpads
+            .get("global:default:daily")
+            .expect("daily record");
+        assert_eq!(
+            record.launch_command.as_deref(),
+            Some(vec!["nvim".to_string(), expected.display().to_string()].as_slice())
+        );
+        assert_eq!(record.scope.kind, "global");
+    }
+
+    #[test]
+    fn daily_honors_nested_moment_format() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join(".obsidian")).unwrap();
+        std::fs::write(
+            vault.path().join(".obsidian").join("daily-notes.json"),
+            r#"{"folder":"Journal","format":"YYYY/MM/YYYY-MM-DD"}"#,
+        )
+        .unwrap();
+        let (_dir, mut app) =
+            app_with_config(FakeHerdr::default(), daily_config(Some(vault.path())));
+
+        app.daily(&daily_args("2026-01-05")).unwrap();
+
+        assert!(
+            vault
+                .path()
+                .join("Journal")
+                .join("2026")
+                .join("01")
+                .join("2026-01-05.md")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn daily_falls_back_to_local_file_without_a_vault() {
+        let (_dir, mut app) = app_with_config(FakeHerdr::default(), daily_config(None));
+
+        let output = app.daily(&daily_args("2026-09-20")).unwrap();
+
+        assert!(matches!(output, Output::Text(text) if text.contains("fallback")));
+        let record = app
+            .registry
+            .scratchpads
+            .get("global:default:daily")
+            .expect("daily record");
+        let file = record.launch_command.as_ref().unwrap()[1].clone();
+        assert!(std::path::Path::new(&file).is_file());
+        assert!(file.ends_with("2026-09-20.md"));
+    }
+
+    #[test]
+    fn daily_print_path_resolves_without_opening_a_runtime() {
+        let vault = tempfile::tempdir().unwrap();
+        let fake = FakeHerdr::default();
+        let calls = fake.calls.clone();
+        let (_dir, mut app) = app_with_config(fake, daily_config(Some(vault.path())));
+        let mut args = daily_args("2026-09-20");
+        args.print_path = true;
+
+        let output = app.daily(&args).unwrap();
+
+        assert!(calls.borrow().is_empty());
+        assert!(app.registry.scratchpads.is_empty());
+        let expected = vault.path().join("2026-09-20.md").display().to_string();
+        assert!(matches!(output, Output::Text(text) if text == expected));
+    }
+
+    #[test]
+    fn daily_reuses_same_day_and_rolls_over_to_a_new_file() {
+        let vault = tempfile::tempdir().unwrap();
+        let fake = FakeHerdr::default();
+        let calls = fake.calls.clone();
+        let (_dir, mut app) = app_with_config(fake, daily_config(Some(vault.path())));
+
+        app.daily(&daily_args("2026-09-20")).unwrap();
+        let opens = || {
+            calls
+                .borrow()
+                .iter()
+                .filter(|c| c.starts_with("open:"))
+                .count()
+        };
+        assert_eq!(opens(), 1);
+
+        // Same day: no new backing runtime, viewer just refocused.
+        app.daily(&daily_args("2026-09-20")).unwrap();
+        assert_eq!(opens(), 1);
+
+        // Next day: old runtime closed, new file tracked.
+        app.daily(&daily_args("2026-09-21")).unwrap();
+        assert_eq!(opens(), 2);
+        assert!(calls.borrow().contains(&"close".to_string()));
+        assert!(vault.path().join("2026-09-21.md").is_file());
+        let record = app
+            .registry
+            .scratchpads
+            .get("global:default:daily")
+            .unwrap();
+        assert!(record.launch_command.as_ref().unwrap()[1].ends_with("2026-09-21.md"));
+    }
+
+    #[test]
+    fn daily_rejects_a_missing_explicit_vault() {
+        let mut config = Config::default();
+        config.notes.vault_path = Some("/does/not/exist-vault".to_string());
+        config.notes.vault_auto = false;
+        let (_dir, mut app) = app_with_config(FakeHerdr::default(), config);
+
+        let err = app.daily(&daily_args("2026-09-20")).unwrap_err();
+        assert!(err.to_string().contains("does not exist"));
+    }
+
+    #[test]
+    fn daily_cli_vault_override_wins_over_config() {
+        let vault_a = tempfile::tempdir().unwrap();
+        let vault_b = tempfile::tempdir().unwrap();
+        let (_dir, mut app) =
+            app_with_config(FakeHerdr::default(), daily_config(Some(vault_a.path())));
+        let args = cli::DailyArgs {
+            vault: Some(vault_b.path().display().to_string()),
+            print_path: true,
+            date: Some("2026-09-20".to_string()),
+        };
+
+        let output = app.daily(&args).unwrap();
+
+        let expected = vault_b.path().join("2026-09-20.md").display().to_string();
+        assert!(matches!(output, Output::Text(text) if text == expected));
+    }
+
+    #[test]
+    fn parse_daily_date_accepts_iso_and_rejects_garbage() {
+        assert!(parse_daily_date(Some("2026-09-20")).is_ok());
+        assert!(parse_daily_date(Some("not-a-date")).is_err());
+        assert!(parse_daily_date(Some("2026-13-01")).is_err());
+        assert!(parse_daily_date(None).is_ok());
+    }
+
+    #[test]
+    fn viewer_pane_receives_the_scratchpad_title_on_open() {
+        let fake = FakeHerdr::default();
+        let calls = fake.calls.clone();
+        let (_dir, mut app) = app_with_fake(fake);
+
+        app.toggle(Some("notes"), None).unwrap();
+
+        assert!(
+            calls
+                .borrow()
+                .contains(&format!("rename:{FAKE_VIEWER_PANE}:Scratchpad:notes"))
+        );
+    }
+
+    #[test]
+    fn one_shot_command_on_default_scratchpad_shows_command_basename() {
+        let fake = FakeHerdr::default();
+        let calls = fake.calls.clone();
+        let (_dir, mut app) = app_with_fake(fake);
+
+        app.toggle(None, Some(vec!["lazygit".to_string()])).unwrap();
+
+        assert!(
+            calls
+                .borrow()
+                .contains(&format!("rename:{FAKE_VIEWER_PANE}:Scratchpad:lazygit"))
+        );
+        assert!(
+            !calls
+                .borrow()
+                .iter()
+                .any(|call| call.contains("Scratchpad:scratch"))
+        );
+    }
+
+    #[test]
+    fn named_scratchpad_keeps_its_name_despite_command_override() {
+        let fake = FakeHerdr::default();
+        let calls = fake.calls.clone();
+        let (_dir, mut app) = app_with_fake(fake);
+
+        app.toggle(Some("git"), Some(vec!["/usr/bin/lazygit".to_string()]))
+            .unwrap();
+
+        assert!(
+            calls
+                .borrow()
+                .contains(&format!("rename:{FAKE_VIEWER_PANE}:Scratchpad:git"))
+        );
+    }
+
+    #[test]
+    fn focus_renames_a_stale_viewer_title() {
+        let fake = FakeHerdr::default();
+        let calls = fake.calls.clone();
+        let (_dir, mut app) = app_with_fake(fake);
+        app.toggle(Some("notes"), None).unwrap();
+        calls.borrow_mut().clear();
+
+        app.focus(Some("notes")).unwrap();
+
+        assert!(
+            calls
+                .borrow()
+                .contains(&format!("rename:{FAKE_VIEWER_PANE}:Scratchpad:notes"))
+        );
+    }
+
+    #[test]
+    fn daily_viewer_shows_the_dated_title() {
+        let fake = FakeHerdr::default();
+        let calls = fake.calls.clone();
+        let (_dir, mut app) = app_with_config(fake, daily_config(None));
+
+        app.daily(&daily_args("2026-09-20")).unwrap();
+
+        assert!(
+            calls
+                .borrow()
+                .contains(&format!("rename:{FAKE_VIEWER_PANE}:daily:2026-09-20"))
+        );
+    }
+
+    #[test]
+    fn display_title_falls_back_to_name_for_empty_commands() {
+        let (_dir, app) = app_with_fake(FakeHerdr::default());
+        assert_eq!(
+            app.display_title("scratch", Some(&[])),
+            "Scratchpad:scratch"
+        );
+        assert_eq!(
+            app.display_title("scratch", Some(&["  ".to_string()])),
+            "Scratchpad:scratch"
+        );
+        assert_eq!(
+            app.display_title("notes", Some(&["lazygit".to_string()])),
+            "Scratchpad:notes"
+        );
     }
 }

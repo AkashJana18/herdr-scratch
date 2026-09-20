@@ -1,19 +1,12 @@
 id = "herdr.scratch"
 name = "Scratch"
-version = "1.0.1"
+version = "1.1.0"
 min_herdr_version = "0.7.4"
 description = "Persistent named scratchpads for Herdr"
 platforms = ["linux", "macos"]
 
 [[build]]
 command = ["/bin/sh", "-c", "exec \"${HERDR_PLUGIN_ROOT:-.}/scripts/install-binary.sh\""]
-
-[[actions]]
-id = "guide"
-title = "Scratch quick start"
-description = "Open a visible guide to toggling, hiding, and configuring Scratch."
-contexts = ["global", "workspace", "tab", "pane"]
-command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" guide"]
 
 [[actions]]
 id = "toggle"
@@ -58,41 +51,11 @@ contexts = ["workspace", "tab", "pane"]
 command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" toggle notes"]
 
 [[actions]]
-id = "size-up"
-title = "Increase popup size"
-description = "Grow the popup scratchpad by the configured resize step."
+id = "daily"
+title = "Open daily note"
+description = "Open today's daily note in your Obsidian vault (auto-detected) or a local fallback file."
 contexts = ["workspace", "tab", "pane"]
-command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" resize up"]
-
-[[actions]]
-id = "size-down"
-title = "Decrease popup size"
-description = "Shrink the popup scratchpad by the configured resize step."
-contexts = ["workspace", "tab", "pane"]
-command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" resize down"]
-
-[[actions]]
-id = "fullscreen"
-title = "Toggle popup fullscreen"
-description = "Expand the popup scratchpad to fullscreen, or restore its previous size."
-contexts = ["workspace", "tab", "pane"]
-command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" fullscreen"]
-
-[[actions]]
-id = "reset"
-title = "Reset popup size"
-description = "Return the popup scratchpad to its configured width and height."
-contexts = ["workspace", "tab", "pane"]
-command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" reset"]
-
-[[panes]]
-id = "guide"
-title = "Scratch quick start"
-description = "Interactive first-run guide for Scratch."
-placement = "popup"
-width = "70%"
-height = "60%"
-command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" guide-pane"]
+command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" daily"]
 
 [[panes]]
 id = "scratch"
@@ -101,10 +64,8 @@ description = "Persistent backing scratchpad runtime."
 command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" session"]
 
 [[panes]]
-id = "popup"
+id = "viewer"
 title = "Scratch"
-description = "Floating scratchpad viewer. Detach with ctrl+b q."
-placement = "popup"
-width = "80%"
-height = "80%"
+description = "Overlay viewer for the scratchpad runtime. All Herdr keys stay active; toggle with the Scratch keybinding."
+placement = "overlay"
 command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-scratch\" attach"]

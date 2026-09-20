@@ -13,17 +13,21 @@ prebuilt binaries from GitHub Releases, so users do not need Rust or Cargo.
 ## Features
 
 - Named scratchpads with `toggle`, `open`, `focus`, `hide`, and `close`.
-- Native 80% × 80% floating popups that detach without stopping their terminal.
-- `change_path` cwd-sync: opening a bare-shell popup cds its terminal to the
-  directory of the pane you opened it from (floax's `@floax change_path`).
-- Popup sizing: step `resize` up/down, `fullscreen` toggle, and `reset` to the
-  configured size, with size persisted per scratchpad.
+- An overlay viewer pane that keeps every Herdr key (including the toggle
+  binding) live while the scratchpad is focused.
+- Dynamic viewer titles: the floating header shows `Scratchpad:{name}`
+  (or `daily:YYYY-MM-DD` for daily notes), refreshed on every show and focus.
+- `change_path` cwd-sync: opening a bare-shell scratchpad cds its terminal to
+  the directory of the pane you opened it from (floax's `@floax change_path`).
 - One-shot command scratchpads, such as `open lazygit -- lazygit`.
-- Resilient popups: re-attach auto-starts the backing Herdr session if it is
-  down, and popup-already-open errors explain how to detach.
-- `list`/`status` report each scratchpad's surface (`popup`/`split`/`tab`) and
-  current popup size; `doctor` checks Herdr server reachability and whether the
-  recommended keybindings are configured.
+- Daily notes: `daily` opens today's Obsidian note (vault auto-detected from
+  `obsidian.json`, folder/format/template read from `.obsidian/daily-notes.json`)
+  in `$EDITOR`, falling back to a local daily file when no vault is found.
+- Resilient viewers: opening a scratchpad auto-starts the backing Herdr session
+  if it is down.
+- `list`/`status` report each scratchpad's surface (`popup`/`split`/`tab`);
+  `doctor` checks Herdr server reachability and whether the recommended
+  keybindings are configured.
 - Scoped scratchpads: `global`, `workspace`, or `cwd`.
 - Reuse of existing live scratchpads to avoid duplicates.
 - Versioned JSON registry with stale-handle repair on `open` and `toggle`.
@@ -33,11 +37,11 @@ prebuilt binaries from GitHub Releases, so users do not need Rust or Cargo.
 - Backend adapter boundary so future Herdr surfaces can be adopted without
   changing the CLI or config.
 
-Popup scratchpads require Herdr 0.7.4 or newer. Their terminals live in a
+Scratchpads require Herdr 0.7.4 or newer. Their backing terminals live in a
 private `herdr-scratch` named session, so opening and hiding them does not add
-tabs or panes to the workspace you are using. Herdr currently supports one
-session-modal popup at a time; detach the active popup with `ctrl+b q` before
-opening another.
+tabs or panes to the workspace you are using. The viewer overlays the tab you
+open it from; press the toggle keybinding again from inside it to return to
+your previous context.
 
 ## Installation
 
@@ -49,20 +53,15 @@ herdr plugin install AkashJana18/herdr-scratch
 
 ## Quick Start
 
-Open the visible getting-started guide:
-
-```bash
-herdr plugin action invoke guide --plugin herdr.scratch
-```
-
-Then toggle the default persistent scratchpad:
+Toggle the default persistent scratchpad:
 
 ```bash
 herdr plugin action invoke toggle --plugin herdr.scratch
 ```
 
-While the popup has focus, press `ctrl+b q` to hide it without stopping its
-terminal. Invoke the toggle action again to bring it back.
+The viewer is an overlay pane, so while the scratchpad has focus you can press
+the toggle keybinding again to hide it without stopping its terminal. Invoke the
+toggle action from another pane to bring it back.
 
 For one-key access, add this to `~/.config/herdr/config.toml`:
 
@@ -78,7 +77,7 @@ Apply the keybinding with `herdr server reload-config`, then use
 `ctrl+b p` to toggle Scratch.
 
 During installation Herdr runs `scripts/install-binary.sh`. The installer
-detects the current platform, downloads the matching `v1.0.1` release asset,
+detects the current platform, downloads the matching `v1.1.0` release asset,
 verifies the SHA256 checksum from `checksums.txt`, and installs the executable
 at:
 
@@ -156,11 +155,9 @@ close_confirmation = true
 placement = "popup"
 split_direction = "right"
 change_path = true
-resize_step = "5%"
-fullscreen_size = "100%"
 
 [ui]
-title_template = "scratch:{name}"
+title_template = "Scratchpad:{name}"
 status_notifications = "errors"
 
 [ui.popup]
@@ -181,6 +178,13 @@ env = {}
 [scratchpads.scratch]
 profile = "default"
 scope = "workspace"
+
+[notes]
+vault_auto = true
+# vault_path = "/path/to/vault"
+# daily_subdir = "Daily"
+# daily_format = "YYYY-MM-DD"
+# editor = "nvim"
 ```
 
 See [docs/public-interface.md](docs/public-interface.md) for the stable public
@@ -189,20 +193,15 @@ interface.
 ## Commands
 
 ```text
-herdr-scratch guide
 herdr-scratch toggle [name] [-- <command>...]
 herdr-scratch open [name] [-- <command>...]
+herdr-scratch daily [--vault PATH] [--date YYYY-MM-DD] [--print-path]
 herdr-scratch focus [name]
 herdr-scratch hide [name]
 herdr-scratch close [name]
-herdr-scratch resize <up|down> [name]
-herdr-scratch fullscreen [name]
-herdr-scratch reset [name]
-herdr-scratch setup
 herdr-scratch list [--json]
 herdr-scratch status [name] [--json]
 herdr-scratch rename <old> <new>
-herdr-scratch send <name> <text>
 herdr-scratch run <name> <command>
 herdr-scratch doctor [--json]
 herdr-scratch --version
@@ -214,26 +213,28 @@ herdr-scratch state path
 
 ## Usage Examples
 
-Open the quick-start guide:
-
-```bash
-herdr-scratch guide
-```
-
 Toggle the default scratchpad:
 
 ```bash
 herdr-scratch toggle
 ```
 
-While the popup has focus, press `ctrl+b q` to hide it. This detaches the popup
-viewer but leaves the scratchpad shell or TUI running. Running `exit` inside the
-scratchpad terminates it permanently.
+The viewer is an overlay pane, so pressing `toggle` again from inside it hides
+it and returns you to your previous context. This leaves the scratchpad shell
+or TUI running. Running `exit` inside the scratchpad terminates it
+permanently.
 
 Open a named scratchpad:
 
 ```bash
 herdr-scratch open notes
+```
+
+Open today's daily note (Obsidian vault auto-detected, else local fallback):
+
+```bash
+herdr-scratch daily
+herdr-scratch daily --print-path
 ```
 
 Open lazygit with one command:
@@ -249,36 +250,22 @@ herdr-scratch config init
 herdr-scratch config add lazygit -- lazygit
 ```
 
-Send a command to an existing scratchpad:
+Run a command in an existing scratchpad:
 
 ```bash
 herdr-scratch run notes "git status"
 ```
 
-One-time onboarding: write the recommended Herdr keybindings for the plugin
-actions. The write is idempotent, never overwrites the config, and skips any
-key that is already in use:
+Add the recommended Herdr keybindings manually (see below), then apply them:
 
 ```bash
-herdr-scratch setup
 herdr server reload-config
 ```
 
-Resize a popup scratchpad (step from `behavior.resize_step`), toggle it
-fullscreen, or reset it to its configured size:
+`doctor` reports any recommended keybindings you still miss:
 
-```bash
-herdr-scratch resize up
-herdr-scratch fullscreen
-herdr-scratch resize down notes
-herdr-scratch reset
-```
-
-Sizing applies to popup scratchpads only; a size change persists for that
-scratchpad until `reset` or a `behavior` config change.
-
-Bare-shell popups follow the pane they were opened from by default: opening a
-popup from `/path/to/project` runs `cd /path/to/project` inside it, so
+Bare-shell scratchpads follow the pane they were opened from by default: opening
+a scratchpad from `/path/to/project` runs `cd /path/to/project` inside it, so
 `behavior.change_path = true` keeps your scratchpad in your current project.
 Command scratchpads (`lazygit`, etc.) never receive the `cd`. Set
 `change_path = false` to disable the sync entirely.
@@ -291,8 +278,7 @@ herdr-scratch status notes
 herdr-scratch doctor
 ```
 
-Recommended Herdr keybindings (also written automatically by
-`herdr-scratch setup`, which never steals keys you have already bound):
+Recommended Herdr keybindings (add them to `~/.config/herdr/config.toml`):
 
 ```toml
 [[keys.command]]
@@ -308,7 +294,7 @@ command = "herdr.scratch.list"
 description = "list scratchpads"
 
 [[keys.command]]
-key = "prefix+g"
+key = "prefix+shift+g"
 type = "plugin_action"
 command = "herdr.scratch.lazygit"
 description = "toggle lazygit scratchpad"
@@ -320,28 +306,10 @@ command = "herdr.scratch.notes"
 description = "toggle notes scratchpad"
 
 [[keys.command]]
-key = "prefix+-"
+key = "prefix+d"
 type = "plugin_action"
-command = "herdr.scratch.size-down"
-description = "shrink popup scratchpad"
-
-[[keys.command]]
-key = "prefix+="
-type = "plugin_action"
-command = "herdr.scratch.size-up"
-description = "grow popup scratchpad"
-
-[[keys.command]]
-key = "prefix+f"
-type = "plugin_action"
-command = "herdr.scratch.fullscreen"
-description = "toggle popup fullscreen"
-
-[[keys.command]]
-key = "prefix+r"
-type = "plugin_action"
-command = "herdr.scratch.reset"
-description = "reset popup scratchpad size"
+command = "herdr.scratch.daily"
+description = "open daily note"
 ```
 
 ## Screenshots
@@ -362,9 +330,9 @@ Placeholder: project-local scratchpad with custom profile.
 - `RuntimeHandle`: opaque Herdr runtime reference.
 - `Herdr` adapter: all Herdr-specific behavior is isolated behind a trait.
 
-Popup handles point to terminals in the private backing session. The popup is
-only a direct-attach viewer, so its process can come and go independently of
-the scratchpad runtime.
+Scratchpad handles point to terminals in the private backing session. The
+overlay viewer is only a direct-attach pane, so its process can come and go
+independently of the scratchpad runtime.
 
 The current implementation uses Herdr's documented CLI/plugin-pane APIs behind
 that adapter. Public commands, config, and registry lifecycle terms do not expose
@@ -392,8 +360,8 @@ is a development wrapper that delegates to `target/release/herdr-scratch`.
 4. Create and push a matching tag:
 
    ```bash
-   git tag v1.0.1
-   git push origin v1.0.1
+    git tag v1.1.0
+    git push origin v1.1.0
    ```
 
 5. GitHub Actions builds release binaries, generates `checksums.txt`, and
@@ -401,7 +369,7 @@ is a development wrapper that delegates to `target/release/herdr-scratch`.
 6. Verify a clean install:
 
    ```bash
-   herdr plugin install AkashJana18/herdr-scratch --ref v1.0.1
+    herdr plugin install AkashJana18/herdr-scratch --ref v1.1.0
    ```
 
 Design decisions and assumptions:

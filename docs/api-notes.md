@@ -34,11 +34,10 @@ There is no Herdr-managed storage API in v1. `HERDR_PLUGIN_CONFIG_DIR` and
 
 `herdr-scratch` declares:
 
-- public actions: `guide`, `toggle`, `open`, `list`, `doctor`
-- named convenience actions: `lazygit`, `notes`
-- one quick-start popup entrypoint: `guide`
+- public actions: `toggle`, `open`, `list`, `doctor`
+- named convenience actions: `lazygit`, `notes`, `daily`
 - one internal pane entrypoint: `scratch`
-- one internal popup viewer entrypoint: `popup`
+- one internal overlay viewer entrypoint: `viewer`
 
 The runtime entrypoint runs the persistent scratchpad process; the popup
 entrypoint attaches a viewer to its terminal. Users should invoke public actions
